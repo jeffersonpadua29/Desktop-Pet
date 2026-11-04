@@ -272,3 +272,17 @@ select { max-width: 145px; background: #fffcf7; border: 1px solid #9d89a8; borde
 @keyframes weather-rain { to { background-position-y: 27px; } }
 @keyframes weather-wind { to { background-position-x: 36px; } }
 @keyframes weather-shiver { 0%, 100% { translate: -1px 0; } 50% { translate: 1px 0; } }
+
+.tasks-header { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-bottom: 8px; }
+.tasks-header h2 { margin: 0; }
+.tasks-header select { max-width: 125px; font-size: 11px; }
+#todo-editor { display: grid; gap: 7px; margin-top: 12px; padding: 9px; background: #edf3df; border: 1px solid #a4b69a; border-radius: 7px; }
+#todo-list { display: grid; gap: 7px; padding: 0; margin: 10px 0; list-style: none; }
+#todo-list li { display: grid; gap: 5px; padding: 8px; border: 1px solid #cbb9cc; border-radius: 6px; background: #f5eddf; overflow-wrap: anywhere; }
+#todo-list time, #todo-list p { color: var(--muted); font-size: 11px; }
+#todo-list .task-overdue { border-color: #bd657b; background: #fae9eb; }
+#todo-list .task-overdue time { color: #8b2648; }
+#todo-list .task-completed strong { text-decoration: line-through; color: var(--muted); }
+#todo-list button, #todo-cancel { border: 1px solid var(--edge); border-radius: 4px; background: var(--paper); padding: 4px 6px; font: inherit; }
+#todo-result { color: #7a3e5b; font-size: 12px; }
+.page-nav button { padding-inline: 2px; font-size: 10px; }

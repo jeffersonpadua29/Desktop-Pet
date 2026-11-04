@@ -7,11 +7,13 @@ import { act, advance, fresh, isSpecies, companionDetails, customizePet, type Pe
 import { defaultPreferences, normalizePreferences, isQuietTime } from './settings';
 import { detectLocation, searchLocations, normalizeLocation, fetchWeather, type WeatherLocation, type WeatherState } from './weather';
 import { routineAt, restoreRoutines, validateRoutines, type Routine, type RoutineState } from './routines';
+import { restoreTodos, changeTodo, pendingReminders, reminderMessage, type Todo } from './todos';
 
 app.setName('Anino');
 const root = join(__dirname, '..');
 let win: BrowserWindow;
 let tray: Tray;
+let rendererIsReady = false;
 let home = {
   active: null as Species | null,
   pets: {} as Partial<Record<Species, Pet>>,
@@ -23,6 +25,7 @@ let home = {
   weatherLastAlert: { key: '', time: 0 },
   routines: [] as Routine[],
   routineRuns: {} as Record<string, string>,
+  todos: [] as Todo[],
 };
 let routineState: RoutineState = { active: null, occurrence: '', ends: 0 };
 
@@ -70,12 +73,13 @@ let weatherRequest: Promise<void> | undefined;
 let nextWeatherCheck = 0;
 let lastWeatherAttempt = 0;
 
-function sendPetAlert(source: string, message: string, count = 1, weatherAlert = false) {
+function sendPetAlert(source: string, message: string, count = 1, kind: 'desktop' | 'weather' | 'reminder' = 'desktop') {
   const prefs = home.preferences;
-  if (!currentPet() || (weatherAlert ? !prefs.weatherAlerts : !prefs.desktopAlerts)) return false;
+  const enabled = { desktop: prefs.desktopAlerts, weather: prefs.weatherAlerts, reminder: prefs.todoReminders }[kind];
+  if (!currentPet() || !enabled) return false;
   win.webContents.send('pet-alert', {
     source, message: prefs.alertPreviews ? message : '', count,
-    silent: home.quiet || quietNow() || !prefs.alertPopups || !win.isVisible(),
+    silent: home.quiet || quietNow() || !win.isVisible() || !prefs.alertPopups, kind,
   });
   return true;
 }
@@ -95,7 +99,7 @@ async function updateWeather(force = false) {
       weather = { location, report, error: '', loading: true };
       const key = location.latitude + ',' + location.longitude + ':' + report.hazard;
       if (report.hazard && (home.weatherLastAlert.key !== key || Date.now() - home.weatherLastAlert.time >= 6 * 3600000) &&
-          sendPetAlert('Weather', location.name + '. ' + report.advisory, 1, true)) {
+          sendPetAlert('Weather', location.name + '. ' + report.advisory, 1, 'weather')) {
         home.weatherLastAlert = { key, time: Date.now() };
         save();
       }
@@ -123,7 +127,22 @@ function status() {
   for (const pet of Object.values(home.pets)) if (pet) names[pet.kind] = pet.name;
   const pet = currentPet();
   return { pet, playing, names, preferences: home.preferences, quietHoursActive: quietNow(), weather,
-    routines: home.routines, routine: routineState, companion: pet ? companionDetails(pet) : null };
+    routines: home.routines, routine: routineState, companion: pet ? companionDetails(pet) : null, todos: home.todos };
+}
+
+function checkTodoReminders() {
+  if (!win || !rendererIsReady || !currentPet() || !home.preferences.todoReminders || home.quiet || quietNow() || !win.isVisible()) return;
+  const pending = pendingReminders(home.todos, Date.now());
+  if (!pending.length) return;
+  const previous = home.todos;
+  const due = new Set(pending.filter(value => value.due).map(value => value.item.id));
+  const ids = new Set(pending.map(value => value.item.id));
+  home.todos = home.todos.map(item => ids.has(item.id) ? { ...item, reminded: true, dueNotified: item.dueNotified || due.has(item.id) } : item);
+  try { save(); } catch (error) { home.todos = previous; console.error('Could not save task reminders:', error); return; }
+  for (const dueNow of [true, false]) {
+    const items = pending.filter(value => value.due === dueNow).map(value => value.item);
+    if (items.length) sendPetAlert('To-do', reminderMessage(items, dueNow), items.length, 'reminder');
+  }
 }
 let alertFile: string | undefined;
 let nextAlertLookup = 0;
@@ -348,6 +367,7 @@ else app.whenReady().then(() => {
   }
   home.preferences = normalizePreferences(home.preferences);
   home.routines = restoreRoutines(home.routines);
+  home.todos = restoreTodos(home.todos);
   if (!home.routineRuns || typeof home.routineRuns !== 'object' || Array.isArray(home.routineRuns)) home.routineRuns = {};
   if (home.position && (!Number.isSafeInteger(home.position.x) || !Number.isSafeInteger(home.position.y))) home.position = null;
   home.weatherLocation = normalizeLocation(home.weatherLocation);
@@ -441,7 +461,7 @@ else app.whenReady().then(() => {
       })),
     };
   });
-  win.webContents.on('did-start-loading', closeToyStage);
+  win.webContents.on('did-start-loading', () => { rendererIsReady = false; closeToyStage(); });
   const media = spawn('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'media.ps1'),
   ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -454,6 +474,14 @@ else app.whenReady().then(() => {
   ipcMain.handle('setup-notifications', launchNotificationSetup);
   ipcMain.handle('status', status);
   ipcMain.handle('preferences', (_event, input: unknown) => changePreferences(input));
+  ipcMain.on('renderer-ready', () => { rendererIsReady = true; checkTodoReminders(); });
+  ipcMain.handle('todo', (_event, input: unknown) => {
+    const previous = home.todos;
+    home.todos = changeTodo(home.todos, input);
+    try { save(); } catch (error) { home.todos = previous; throw error; }
+    checkTodoReminders();
+    return status();
+  });
   ipcMain.handle('routines', (_event, input: unknown) => {
     const previous = home.routines;
     home.routines = validateRoutines(input);
@@ -525,6 +553,7 @@ else app.whenReady().then(() => {
   const alerts = setInterval(pollWindowsAlerts, 1000);
   const weatherTimer = setInterval(() => { void updateWeather(); }, 60000);
   const routinesTimer = setInterval(updatePets, 15000);
+  const todoTimer = setInterval(checkTodoReminders, 5000);
   void updateWeather();
   const autosave = setInterval(() => { updatePets(); save(); }, 30000);
   app.on('before-quit', () => {
@@ -533,6 +562,7 @@ else app.whenReady().then(() => {
     clearInterval(alerts);
     clearInterval(weatherTimer);
     clearInterval(routinesTimer);
+    clearInterval(todoTimer);
     clearInterval(autosave);
     clearInterval(hitTest);
     updatePets();

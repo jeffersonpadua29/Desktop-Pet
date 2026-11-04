@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="style.css">
 <script defer src="art/attachments.js"></script>
 <script defer src="dist/attachments.js"></script>
+<script defer src="dist/tasks.js"></script>
 <script defer src="dist/renderer.js"></script>
 </head>
 <body>
@@ -47,6 +48,7 @@
       <button type="button" data-page="care" aria-pressed="true">Care</button>
       <button type="button" data-page="desk" aria-pressed="false">Desk</button>
       <button type="button" data-page="alerts" aria-pressed="false">Alerts</button>
+      <button type="button" data-page="todos" aria-pressed="false">To-do</button>
       <button type="button" data-page="journal" aria-pressed="false">Journal</button>
       <button type="button" data-page="settings" aria-pressed="false">Settings</button>
     </nav>
@@ -93,6 +95,18 @@
       <p id="alerts-empty">No saved alerts yet.</p>
       <ul id="alerts-list"></ul>
     </section>
+    <section id="page-todos" aria-label="Tasks and deadlines" hidden>
+      <div class="tasks-header"><h2>To-do and deadlines</h2><select id="todo-filter" aria-label="Filter tasks"><option value="open">Open tasks</option><option value="completed">Completed</option><option value="all">All tasks</option></select></div>
+      <p class="settings-help">Reminders run while Pet Pocket is open. Overdue tasks are checked when you reopen it. Quiet periods defer reminders.</p>
+      <p id="todo-empty">No tasks yet.</p><ul id="todo-list"></ul>
+      <form id="todo-editor">
+        <label for="todo-title">Task</label><input id="todo-title" maxlength="140" required placeholder="What needs to get done?">
+        <label for="todo-deadline">Deadline (local time)</label><input id="todo-deadline" type="datetime-local" required>
+        <label for="todo-remind">Advance reminder</label><select id="todo-remind"><option value="0">At the deadline</option><option value="5">5 minutes before</option><option value="15" selected>15 minutes before</option><option value="30">30 minutes before</option><option value="60">1 hour before</option><option value="1440">1 day before</option></select>
+        <div class="settings-row"><button type="submit" id="todo-save">Add task</button><button type="button" id="todo-cancel" hidden>Cancel edit</button></div>
+      </form>
+      <p id="todo-result" role="status"></p>
+    </section>
     <section id="page-settings" aria-label="Preferences" hidden>
       <form id="preferences">
         <fieldset><legend>Movement and appearance</legend>
@@ -110,6 +124,7 @@
         <fieldset><legend>Alerts</legend>
           <label class="check"><input type="checkbox" name="desktopAlerts">Receive desktop alerts</label>
           <label class="check"><input type="checkbox" name="weatherAlerts">Receive weather advisories</label>
+          <label class="check"><input type="checkbox" name="todoReminders">Receive deadline reminders</label>
           <label class="check"><input type="checkbox" name="alertPopups">Show alert bubbles</label>
           <label class="check"><input type="checkbox" name="alertPreviews">Show message previews</label>
         </fieldset>

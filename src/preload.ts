@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('anino', {
   onOpenControls: (callback: () => void) => ipcRenderer.on('open-controls', callback),
   onCareFeedback: (callback: (reaction: { mood: string; message: string }) => void) => ipcRenderer.on('care-feedback', (_event, reaction) => callback(reaction)),
   preferences: (input: unknown) => ipcRenderer.invoke('preferences', input),
+  ready: () => ipcRenderer.send('renderer-ready'),
+  todo: (input: unknown) => ipcRenderer.invoke('todo', input),
   routines: (input: unknown) => ipcRenderer.invoke('routines', input),
   customizePet: (input: unknown) => ipcRenderer.invoke('customize-pet', input),
   returnToScreen: () => ipcRenderer.invoke('return-to-screen'),

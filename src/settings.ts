@@ -10,6 +10,7 @@ export const defaultPreferences = {
   alertPopups: true,
   alertPreviews: true,
   weatherReactions: true,
+  todoReminders: true,
 };
 export type Preferences = typeof defaultPreferences;
 
@@ -17,7 +18,7 @@ export function normalizePreferences(input: unknown): Preferences {
   const output = { ...defaultPreferences };
   if (!input || typeof input !== 'object') return output;
   const saved = input as Record<string, unknown>;
-  for (const key of ['locked', 'quietHours', 'desktopAlerts', 'weatherAlerts', 'alertPopups', 'alertPreviews', 'weatherReactions'] as const) {
+  for (const key of ['locked', 'quietHours', 'desktopAlerts', 'weatherAlerts', 'alertPopups', 'alertPreviews', 'weatherReactions', 'todoReminders'] as const) {
     if (typeof saved[key] === 'boolean') output[key] = saved[key];
   }
   if (['off', 'rarely', 'normal', 'often'].includes(String(saved.roamFrequency))) output.roamFrequency = saved.roamFrequency as Preferences['roamFrequency'];

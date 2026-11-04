@@ -53,6 +53,7 @@ async function start(saved, weatherOverrides = {}) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../dist/main.js'),'utf8'),context);
   await new Promise(resolve=>setImmediate(resolve));
   return {call:(name,...args)=>ipc[name]({},...args),window,files,alerts,menu:()=>menu,area,location,
+    tickReminders:()=>intervals.find(fn=>fn.name==='checkTodoReminders')(),
     desktopAlert:input=>{windowsAlert=input;intervals.find(fn=>fn.name==='pollWindowsAlerts')();}};
 }
 
@@ -185,3 +186,34 @@ test('customized personalities and unlocked accessories survive saving', async (
   assert.equal(restarted.call('status').companion.personality,'Dreamy');
   assert.throws(()=>restarted.call('customize-pet',{personality:'curious',accessory:'crown'}),/locked/);
 });
+
+test('deadline reminders wait for the renderer and do not repeat after restart',async()=>{
+  const app=await start({pets:{cat:fresh(Date.now(),'cat','Mochi')},active:'cat'});
+  app.call('todo',{type:'save',title:'Submit assignment',deadline:Date.now()-1000,remindMinutes:15});
+  assert.equal(app.alerts.length,0);
+  app.call('renderer-ready');
+  const alert=app.alerts.find(value=>value.channel==='pet-alert');
+  assert.equal(alert.data.kind,'reminder');
+  assert.match(alert.data.message,/Submit assignment/);
+  assert.equal(app.call('status').todos[0].dueNotified,true);
+  app.tickReminders();assert.equal(app.alerts.length,1);
+  const saved=JSON.parse(app.files[path.join('/virtual/userData','pet.json')]);
+  const restarted=await start(saved);restarted.call('renderer-ready');
+  assert.equal(restarted.alerts.length,0);
+});
+
+test('quiet periods defer task notifications and reminders have an independent toggle',async()=>{
+  const app=await start({pets:{cat:fresh(Date.now(),'cat','Mochi')},active:'cat'});
+  app.call('renderer-ready');
+  const quiet={...currentRoutine('quiet'),id:'quiet'};
+  app.call('routines',[quiet]);
+  app.call('todo',{type:'save',title:'Quiet task',deadline:Date.now()-1000,remindMinutes:0});
+  assert.equal(app.call('status').todos[0].dueNotified,false);
+  app.call('preferences',{desktopAlerts:false,todoReminders:false});
+  app.call('routines',[]);app.tickReminders();
+  assert.equal(app.alerts.filter(value=>value.channel==='pet-alert').length,0);
+  app.call('preferences',{todoReminders:true});app.tickReminders();
+  assert.equal(app.alerts.find(value=>value.channel==='pet-alert').data.silent,false);
+  assert.equal(app.call('status').todos[0].dueNotified,true);
+});
+

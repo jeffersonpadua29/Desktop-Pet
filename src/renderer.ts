@@ -9,13 +9,15 @@ type WeatherState = import('./weather').WeatherState;
 type Routine = import('./routines').Routine;
 type RoutineState = import('./routines').RoutineState;
 type Companion = ReturnType<typeof import('./pet').companionDetails>;
-type HomeSnapshot = { pet: Snapshot | null; playing: boolean; names: Partial<Record<Species, string>>; preferences: Preferences; quietHoursActive: boolean; weather: WeatherState; routines: Routine[]; routine: RoutineState; companion: Companion | null };
+type HomeSnapshot = { pet: Snapshot | null; playing: boolean; names: Partial<Record<Species, string>>; preferences: Preferences; quietHoursActive: boolean; weather: WeatherState; routines: Routine[]; routine: RoutineState; companion: Companion | null; todos: import('./todos').Todo[] };
 const api = (window as Window & { anino?: {
   setupNotifications: () => Promise<boolean>;
-  onAlert: (callback: (alert: { source: string; message: string; count: number; silent: boolean }) => void) => void;
+  onAlert: (callback: (alert: { source: string; message: string; count: number; silent: boolean; kind?: 'desktop' | 'weather' | 'reminder' }) => void) => void;
   onOpenControls: (callback: () => void) => void;
   onCareFeedback: (callback: (reaction: { mood: string; message: string }) => void) => void;
   preferences: (input: Preferences) => Promise<HomeSnapshot>;
+  ready: () => void;
+  todo: (input: import('./todos').TodoChange) => Promise<HomeSnapshot>;
   routines: (input: Routine[]) => Promise<HomeSnapshot>;
   customizePet: (input: { personality: string; accessory: string }) => Promise<HomeSnapshot>;
   returnToScreen: () => Promise<void>;
@@ -203,6 +205,7 @@ function renderHome(state: HomeSnapshot) {
   renderPreferences(state);
   renderWeather(state.weather);
   renderRoutines();
+  configureTodos(state.todos);
   names = state.names;
   if (state.playing !== playing) musicSince = state.playing ? Date.now() : 0;
   playing = state.playing;
@@ -565,12 +568,14 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]
     }
   });
 }
+let rendererReady = false;
 async function refresh() {
   if (busy) return;
   const requested = revision;
   const state = await api.status();
   if (requested !== revision) return;
   renderHome(state);
+  if (!rendererReady) { rendererReady = true; api.ready(); }
   if (state.pet) await tryIdleMove(state.pet);
 }
 for (const button of roster) {
@@ -639,7 +644,8 @@ for (const button of pageButtons) {
 
 
 const petAlert = document.querySelector<HTMLElement>('#pet-alert')!;
-type SavedAlert = { source: string; message: string; count: number; time: number };
+type SavedAlert = { source: string; message: string; count: number; time: number; kind?: 'desktop' | 'weather' | 'reminder' };
+let currentAlertKind: SavedAlert['kind'];
 const inboxKey = 'pet-pocket-alerts';
 let inbox: SavedAlert[] = [];
 try {
@@ -693,7 +699,7 @@ document.querySelector('#open-alerts')!.addEventListener('click', () => {
   if (picking) showPicker(false);
   panel.hidden = false;
   petButton.setAttribute('aria-expanded', 'true');
-  document.querySelector<HTMLButtonElement>('[data-page="alerts"]')!.click();
+  document.querySelector<HTMLButtonElement>(currentAlertKind === 'reminder' ? '[data-page="todos"]' : '[data-page="alerts"]')!.click();
 });
 document.querySelector('#clear-alerts')!.addEventListener('click', () => {
   inbox = [];
@@ -709,11 +715,15 @@ document.addEventListener('visibilitychange', () => {
 });
 
 renderInbox();
-api.onAlert(({ source, message, count, silent }) => {
-  inbox = [{ source, message, count, time: Date.now() }, ...inbox].slice(0, 20);
+api.onAlert(({ source, message, count, silent, kind = 'desktop' }) => {
+  inbox = [{ source, message, count, kind, time: Date.now() }, ...inbox].slice(0, 20);
   saveInbox();
   renderInbox();
-  if (!silent) showPetAlert(source, message, count);
+  if (!silent) {
+    currentAlertKind = kind;
+    document.querySelector('#open-alerts')!.textContent = kind === 'reminder' ? 'Open to-do' : 'Open alerts';
+    showPetAlert(source, message, count);
+  }
 });
 
 preferencesForm.addEventListener('input', () => { preferencesDirty = true; });
