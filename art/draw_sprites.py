@@ -1,0 +1,549 @@
+"""Draw the transparent 32px sprite sheets. Run from the project folder."""
+import struct
+import zlib
+from pathlib import Path
+
+KINDS = {
+    'anino': ('#23182f', '#5d4479', '#9872b4', '#d9ff9b'),
+    'cat': ('#492938', '#eea24f', '#ffe1a2', '#593445'),
+    'dog': ('#462e38', '#c27c55', '#f6d19b', '#442d3d'),
+    'ghost': ('#3e305e', '#aa8bde', '#eae0ff', '#513c76'),
+    'sprout': ('#42324c', '#e69d77', '#ffd6aa', '#4e3949'),
+    'robot': ('#25384f', '#6c9fb5', '#c7edf0', '#a9ffdf'),
+    'bunny': ('#70485d', '#dda6a6', '#fff0dc', '#563747'),
+    'cloud': ('#565381', '#afa9df', '#f9efff', '#53446f'),
+    'chicken': ('#563341', '#f8dfad', '#fff5dc', '#4a3040'),
+}
+MOODS = ('idle', 'eat', 'happy', 'sleep', 'surprised', 'dance', 'stretch', 'headphones', 'run', 'carry', 'crouch', 'pickup', 'pounce', 'hungry', 'tired', 'groove')
+SIZE = 32
+FRAMES = 6
+
+def draw(kind, mood, f, blink_now=False):
+    if kind in ('ghost', 'sprout', 'robot', 'bunny', 'cloud'):
+        return mascot(kind, mood, f, blink_now)
+    if mood in ('run', 'carry', 'crouch', 'pickup', 'pounce'):
+        return profile(kind, mood, f)
+    pixels = bytearray(SIZE * SIZE * 4)
+    dark, fur, light, eyes = KINDS[kind]
+    pink, gold, purple = '#ff9cad', '#ffd771', '#bfa0ff'
+    hop = [0, 1, 2, 1, 0, 0][f]
+    sleeping = mood == 'sleep'
+    hungry = mood == 'hungry'
+    tired = mood == 'tired'
+    music = mood in ('dance', 'headphones', 'groove')
+    y = -hop if mood in ('happy', 'surprised') else 2 if sleeping else 0
+    if mood == 'stretch':
+        y = -[0, 1, 2, 2, 1, 0][f]
+    x = 0
+
+    def box(left, top, width, height, color, moving=True):
+        color = bytes.fromhex(color.lstrip('#'))
+        if len(color) == 3:
+            color += b'\xff'
+        if moving:
+            left, top = left + x, top + y
+        for py in range(max(0, top), min(SIZE, top + height)):
+            for px in range(max(0, left), min(SIZE, left + width)):
+                i = (py * SIZE + px) * 4
+                pixels[i:i + 4] = color
+
+    def blob(left, top, width, height, color):
+        box(left + 2, top, width - 4, height, color)
+        box(left, top + 2, width, height - 4, color)
+        box(left + 1, top + 1, width - 2, height - 2, color)
+
+    def star(left, top, color):
+        box(left + 1, top, 1, 3, color)
+        box(left, top + 1, 3, 1, color)
+
+    box(5, 27, 23, 2, '#1a112a65', False)
+    wag = 0 if music or sleeping or tired else [0, -1, -2, -1, 0, 1][f]
+    if kind in ('cat', 'anino', 'dog'):
+        box(23, 20, 5, 4, dark)
+        box(26, 15 + wag, 3, 8 - wag, dark)
+        box(26, 17 + wag, 2, 5 - wag, fur)
+        if kind == 'cat':
+            box(27, 14 + wag, 3, 3, dark)
+    if kind == 'chicken':
+        box(24, 14 + wag, 4, 7, dark)
+        box(25, 15 + wag, 2, 4, light)
+        for foot in (11, 21):
+            box(foot, 24, 2, 3, '#cb7a51')
+            box(foot - 1, 26, 4, 1, '#f5a565')
+    else:
+        for foot in (8, 20):
+            box(foot, 24, 5, 3, dark)
+            box(foot + 1, 24, 3, 1, fur)
+    if tired:
+        y = (1, 1, 2, 2, 2, 1)[f]
+    elif hungry and kind == 'chicken':
+        y = (0, 0, 1, 2, 1, 0)[f]
+    if music:
+        # Torso, tail, and feet use fixed screen coordinates in every music frame.
+        blob(7, 16, 19, 9, dark)
+        blob(8, 17, 17, 7, fur)
+        box(11, 22, 11, 2, light)
+        if kind == 'chicken':
+            box(22, 19, 4, 3, '#d3a574')
+            box(23, 19, 2, 1, light)
+        if mood in ('dance', 'groove'):
+            head_offsets = {
+                'anino': ((0, 0), (0, 1), (0, 2), (0, 1), (0, 0), (0, -1)),
+                'cat': ((-1, 0), (-1, 1), (0, 1), (1, 0), (1, 1), (0, 1)),
+                'dog': ((0, 0), (0, 1), (0, 2), (0, 2), (0, 1), (0, 0)),
+                'chicken': ((0, 0), (1, 1), (2, 1), (1, 0), (0, 0), (-1, 0)),
+            }
+            x, y = head_offsets[kind][f]
+            if mood == 'groove':
+                x += (0, -1, -1, 0, 1, 1)[f]
+                y -= (0, 1, 2, 1, 0, 0)[f]
+        blob(6, 8, 20, 13, dark)
+        blob(7, 9, 18, 11, fur)
+    else:
+        blob(6, 11 if sleeping else 9, 20, 16, dark)
+        blob(7, 12 if sleeping else 10, 18, 13, fur)
+        box(10, 21, 12, 3, light)
+    if kind in ('cat', 'anino'):
+        for ear in (7, 21):
+            box(ear, 4, 4, 8, dark)
+            box(ear + (1 if ear == 7 else -1), 7, 4, 4, dark)
+            box(ear + 1, 6, 2, 4, pink if kind == 'cat' else light)
+        if kind == 'cat':
+            for stripe in (13, 16, 19):
+                box(stripe, 10, 1, 3 if stripe == 16 else 2, '#b96650')
+    elif kind == 'dog':
+        for ear in (4, 23):
+            droop = 2 if tired else f % 2 if mood == 'dance' else 0
+            blob(ear, 9 + droop, 5, 11, dark)
+            box(ear + 1, 11 + droop, 3, 6, '#80504a')
+        box(15, 11, 3, 8, light)
+        blob(11, 16 if music else 17, 10, 5 if music else 6, light)
+    else:
+        crest = -1 if mood in ('dance', 'happy') and f % 2 else 0
+        box(12, 6 + crest, 10, 5, '#9c4051')
+        box(14, 4 + crest, 3, 5, '#e65c64')
+        box(18, 5 + crest, 3, 4, '#f27369')
+        if not music:
+            wing = hop if mood == 'happy' else 0
+            box(22, 18 - wing, 4, 4, '#d3a574')
+            box(23, 18 - wing, 3, 2, light)
+    if hungry:
+        # Each species asks for food differently.
+        for eye in (10, 20):
+            if kind == 'cat':
+                box(eye, 14, 3, 4, eyes)
+                box(eye + 1, 15, 1, 1, '#fff9dd')
+            elif kind == 'dog':
+                blob(eye - 1, 13, 5, 6, eyes)
+                box(eye, 14, 2, 2, '#fff9dd')
+            elif kind == 'chicken':
+                box(eye, 14, 2, 3, eyes)
+            else:
+                box(eye, 15, 4, 2, eyes)
+        if kind == 'cat':
+            box(14, 19, 4, 2 + (f in (2, 3)), dark)
+            box(15, 21, 2, 1, pink)
+            box(8, 18, 3, 1, light)
+            box(22, 18, 3, 1, light)
+        elif kind == 'dog':
+            box(14, 18, 4, 2, dark)
+            box(15, 20, 2, 2, pink)
+            if f in (2, 3, 4):
+                box(22, 20, 1, 2, '#89d9e9')
+                box(21, 22, 2, 1, '#b7edf2')
+        elif kind == 'chicken':
+            box(13, 18, 6, 2, '#df8742')
+            box(14, 18, 4, 1, gold)
+            if f in (2, 3):
+                box(15, 20, 2, 2, dark)
+        else:
+            box(11, 13, 3, 1, light)
+            box(19, 13, 3, 1, light)
+            box(13, 19, 6, 2, dark)
+            box(14, 19, 1, 1, '#fff9dd')
+            box(17, 19, 1, 1, '#fff9dd')
+        if f < 4:
+            box(26, 4, 4, 3, '#f8ca80', False)
+            box(27, 4, 2, 1, '#fff0b5', False)
+            box(28, 6, 2, 1, '#b96c48', False)
+            box(25, 8, 1, 1, '#f8ca80', False)
+    elif tired:
+        for eye in (10, 20):
+            box(eye, 15, 4, 1, eyes)
+            if f < 2:
+                box(eye + 1, 16, 2, 1, eyes)
+            else:
+                box(eye + 1, 14, 2, 1, eyes)
+        if kind == 'chicken':
+            box(13, 18, 6, 2, '#e19549')
+            box(14, 19, 4, 1, gold)
+        else:
+            box(14, 18, 4, 2 + (f in (2, 3)), dark)
+            if kind == 'cat' and f in (2, 3):
+                box(15, 20, 2, 1, pink)
+        if f >= 2:
+            z = 6 - (f - 2)
+            box(26, z, 3, 1, purple, False)
+            box(27, z + 1, 1, 1, purple, False)
+            box(26, z + 2, 3, 1, purple, False)
+    else:
+        blink = sleeping or blink_now or (mood == 'idle' and f == 5)
+        for eye in (11, 20):
+            eye_y = 16 if sleeping else 14
+            box(eye - int(blink), eye_y + int(blink), 4 if blink else 2, 1 if blink else 3, eyes)
+            if not blink and kind == 'anino':
+                box(eye, eye_y, 1, 1, '#ffffdf')
+        for cheek in (9, 22):
+            box(cheek, 18, 2, 1, pink)
+        mouth = 1 + (f % 2) if mood == 'eat' else 2 if mood == 'surprised' else 1
+        box(14, 18, 4, mouth, '#e79b48' if kind == 'chicken' else dark)
+        if kind == 'chicken':
+            box(15, 18, 2, 1, gold)
+        elif kind == 'cat':
+            box(6, 18, 3, 1, light)
+            box(23, 18, 3, 1, light)
+    if music:
+        box(10, 6, 12, 2, purple)
+        for side in (6, 23):
+            box(side + 1, 8, 2, 6, purple)
+            blob(side, 13, 4, 7, '#7857a2')
+            box(side + 1, 14, 2, 5, purple)
+        if mood in ('dance', 'groove'):
+            note_x = 27 if f < 3 else 3
+            note_y = 8 - f % 3
+            box(note_x, note_y, 1, 4, gold, False)
+            box(note_x, note_y, 3, 1, gold, False)
+            box(note_x - 1, note_y + 3, 2, 2, gold, False)
+    if mood == 'groove' and f % 2 == 0:
+        star(1, 12, pink)
+        star(28, 3, gold)
+    if mood == 'fidget':
+        gesture = (0, 1, 2, 2, 1, 0)[f]
+        if kind == 'cat':
+            blob(7 + gesture, 21 - gesture, 5, 5, dark)
+            box(8 + gesture, 22 - gesture, 3, 2, light)
+        elif kind == 'dog':
+            box(15, 20, 2, 1 + gesture, pink)
+            box(25, 9 - gesture, 2, 2, light)
+        elif kind == 'chicken':
+            box(14, 20 + gesture, 3, 1, gold)
+            box(12 + gesture, 24 - gesture, 1, 1, '#fff5dc')
+        else:
+            star(2 + f % 3, 11 - gesture, purple)
+            star(27, 8 + gesture, gold)
+    if mood == 'look':
+        shift = (-2, -2, -1, 1, 2, 0)[f]
+        box(10, 14, 15, 4, fur)
+        for eye in (11, 20):
+            box(eye + shift, 14, 2, 3, eyes)
+        if kind == 'dog':
+            box(15, 15, 2, 3, light)
+    if sleeping:
+        z = 5 - f % 3
+        box(24, z, 3, 1, purple)
+        box(25, z + 1, 1, 1, purple)
+        box(24, z + 2, 3, 1, purple)
+    if mood == 'eat':
+        box(15 - f % 2, 22, 5, 3, '#ba704d')
+        box(16 - f % 2, 22, 2, 1, gold)
+        box(21, 21 - f % 3, 1, 1, gold)
+    if mood in ('happy', 'surprised') and f % 2 == 0:
+        star(3, 7, pink if mood == 'happy' else gold)
+        star(25, 6, gold)
+    return pixels
+
+def profile(kind, mood, frame):
+    """Draw a side profile facing left, with a six-frame foot cycle."""
+    pixels = bytearray(SIZE * SIZE * 4)
+    dark, fur, light, eye = KINDS[kind]
+    low = mood in ('crouch', 'pickup')
+    running = mood in ('run', 'carry')
+    lunge = mood == 'pounce'
+    bob = (0, -1, -1, 0, -1, -1)[frame] if running else 1
+
+    def rect(x, y, w, h, color):
+        ink = bytes.fromhex(color.lstrip('#'))
+        if len(ink) == 3:
+            ink += b'\xff'
+        for py in range(y, y + h):
+            for px in range(x, x + w):
+                start = (py * SIZE + px) * 4
+                pixels[start:start + 4] = ink
+
+    def body(x, y, w, h, color):
+        rect(x + 1, y, w - 2, h, color)
+        rect(x, y + 1, w, h - 2, color)
+
+    rect(5, 27, 23, 2, '#1a112a65')
+    step = (0, -4, -2, 0, 4, 2)[frame] if running else -4 if lunge else 0
+    dip = (0, 1, 3, 3, 2, 0)[frame] if mood == 'pickup' else 0
+    if kind == 'chicken':
+        for x, shift in ((12, step), (20, -step)):
+            rect(x + shift, 22, 2, 5, '#a96649')
+            rect(x + shift - 2, 26, 4, 1, '#e69b55')
+        body(11, 12 + bob, 14, 12, dark)
+        body(12, 13 + bob, 12, 10, fur)
+        body(15, 16 + bob, 8, 5, '#e3bb86')
+        rect(23, 11 + bob, 4, 4, light)
+        head = bob + dip
+        body(5, 9 + head, 12, 10, dark)
+        body(6, 10 + head, 10, 8, light)
+        rect(7, 7 + head, 7, 3, '#d95362')
+        rect(8, 6 + head, 2, 3, '#f4776d')
+        rect(3, 14 + head, 4, 2, '#e59a48')
+        rect(8, 12 + head, 2, 2, eye)
+    else:
+        for x, shift in ((10, step), (21, -step)):
+            rect(x + shift, 22, 3, 5, dark)
+            rect(x + shift - 1, 25, 4, 2, dark)
+        body(9, (16 if low else 13) + bob, 17, 10 if low else 12, dark)
+        body(10, (17 if low else 14) + bob, 15, 8 if low else 10, fur)
+        rect(13, 21 + bob, 9, 2, light)
+        tail = (0, 1, 0, -1, 0, 1)[frame] if running else 0
+        rect(24, 15, 4, 3, dark)
+        rect(27, 10 + tail, 3, 7 - tail, dark)
+        rect(27, 11 + tail, 2, 4 - tail, fur)
+        y = (12 if low else 9) + bob + dip - (1 if mood == 'carry' else 0)
+        body(5, y, 13, 12, dark)
+        body(6, y + 1, 11, 10, fur)
+        if kind == 'dog':
+            ear = 1 if running and frame in (1, 2, 4) else 0
+            body(12 + ear, y + 1, 5, 10, '#80504a')
+            body(3, y + 6, 8, 5, light)
+            rect(3, y + 6, 3, 2, dark)
+        else:
+            rect(8, y - 4, 4, 6, dark)
+            rect(13, y - 3, 3, 6, dark)
+            rect(9, y - 2, 2, 3, '#ff9cad' if kind == 'cat' else light)
+            rect(5, y + 8, 6, 1, light)
+        rect(8, y + 4, 2, 2, eye)
+    return pixels
+
+def mascot(kind, mood, frame, blink_now=False):
+    """Draw three desktop mascots with a shared pose sheet and distinct motion."""
+    pixels = bytearray(SIZE * SIZE * 4)
+    ink, shade, glow, eye = KINDS[kind]
+    arc = (0, 1, 2, 2, 1, 0)[frame]
+    stride = (0, 2, 3, 0, -2, -3)[frame]
+    moving = mood in ('run', 'carry')
+    profile = mood in ('run', 'carry', 'crouch', 'pickup', 'pounce')
+    sleepy = mood in ('sleep', 'tired')
+    music = mood in ('headphones', 'dance', 'groove')
+
+    def rect(x, y, w, h, color):
+        rgba = bytes.fromhex(color.lstrip('#'))
+        if len(rgba) == 3:
+            rgba += b'\xff'
+        for py in range(max(0, y), min(SIZE, y + h)):
+            for px in range(max(0, x), min(SIZE, x + w)):
+                start = (py * SIZE + px) * 4
+                pixels[start:start + 4] = rgba
+
+    def rounded(x, y, w, h, color):
+        rect(x + 2, y, w - 4, h, color)
+        rect(x + 1, y + 1, w - 2, h - 2, color)
+        rect(x, y + 2, w, h - 4, color)
+
+    def sparkle(x, y, color):
+        rect(x + 1, y, 1, 3, color)
+        rect(x, y + 1, 3, 1, color)
+
+    rect(7, 27, 19, 2, '#25193964')
+    y = arc if sleepy or mood == 'pickup' else -arc if mood in ('happy', 'pounce', 'surprised') else 0
+    face_x = -3 if profile else 0
+    face_y = y
+
+    def oval(cx, cy, rx, ry, color):
+        for py in range(cy - ry, cy + ry + 1):
+            for px in range(cx - rx, cx + rx + 1):
+                if (px - cx) ** 2 * ry ** 2 + (py - cy) ** 2 * rx ** 2 <= rx ** 2 * ry ** 2:
+                    rect(px, py, 1, 1, color)
+
+    if kind == 'bunny':
+        ear = (0, 1, 2, 1, 0, -1)[frame]
+        face_y = y + (arc if music else 0)
+        for foot, shift in ((11, stride), (21, -stride)):
+            oval(foot + (shift if moving else 0), 24, 4, 2, ink)
+            oval(foot + (shift if moving else 0), 24, 3, 1, glow)
+        oval(16, 21, 8, 4, ink)
+        oval(16, 20, 7, 4, shade)
+        oval(25, 20, 4, 4, ink)
+        oval(25, 19, 3, 3, glow)
+        oval(11, 7 + face_y, 3, 6, ink)
+        oval(11, 7 + face_y, 2, 5, glow)
+        oval(11, 6 + face_y, 1, 3, '#ef9eaf')
+        oval(20, 7 + face_y + ear, 3, 5, ink)
+        oval(20, 7 + face_y + ear, 2, 4, glow)
+        oval(20, 7 + face_y + ear, 1, 2, '#ef9eaf')
+        oval(16, 16 + face_y, 10, 7, ink)
+        oval(16, 15 + face_y, 9, 6, glow)
+        oval(10, 17 + face_y, 2, 1, '#efb5ba')
+        oval(22, 17 + face_y, 2, 1, '#efb5ba')
+    elif kind == 'cloud':
+        drift = (0, -1, -2, -2, -1, 0)[frame]
+        face_y = y + (0 if music or mood == 'pickup' else drift)
+        puff = arc if mood == 'groove' else 0
+        for cx, cy, rx, ry in ((8, 18, 6, 5), (14, 13, 7, 7), (21, 15, 7, 6), (25, 19, 5, 4)):
+            oval(cx, cy + face_y, rx, ry, ink)
+        oval(16, 20 + face_y, 12, 5, ink)
+        for cx, cy, rx, ry in ((8, 18, 5, 4), (14, 13, 6, 6), (21, 15, 6, 5), (25, 19, 4, 3)):
+            oval(cx, cy + face_y, rx, ry, shade)
+            oval(cx, cy + face_y - 1, rx - 1, ry - 1, glow)
+        oval(16, 19 + face_y, 11, 4, glow)
+        oval(13, 11 + face_y, 3, 1, '#ffffff')
+        face_y += puff
+        if moving or mood in ('happy', 'groove'):
+            sparkle(26, 8 - frame % 3, '#f2c879')
+    elif kind == 'ghost':
+        drift = (0, -2, -4, -4, -2, 0)[frame]
+        y += drift if not sleepy and not music else 0
+        face_y = y
+        rounded(7, 7 + y, 19, 17, ink)
+        rounded(8, 8 + y, 17, 15, glow)
+        rect(9, 19 + y, 15, 5, shade)
+        for i in range(3):
+            tail = (frame + i) % 3 if not music else 1
+            rect(8 + i * 6, 21 + y, 5, 3 + tail, ink)
+            rect(9 + i * 6, 21 + y, 3, 2 + tail, shade)
+        rect(10, 11 + y, 2, 4, '#fffaff')
+        if moving:
+            sparkle(26, 17 + frame % 3, '#d3b8f6')
+        if mood in ('dance', 'groove'):
+            face_y = (0, 1, 2, 1, 0, -1)[frame] if mood == 'dance' else (0, -1, 1, -2, 1, 0)[frame]
+    elif kind == 'sprout':
+        for foot, shift in ((10, stride), (20, -stride)):
+            rect(foot + (shift if moving else 0), 24, 4, 3, ink)
+        rect(9, 17 + y, 15, 7, ink)
+        rect(10, 18 + y, 13, 7, shade)
+        rect(11, 19 + y, 2, 5, '#f7b58b')
+        rect(21, 19 + y, 2, 5, '#bd765e')
+        face_y = y + (arc if mood == 'dance' else (0, 2, -1, 2, 0, -1)[frame] if mood == 'groove' else 0)
+        leaf = (0, -1, -2, -1, 0, 1)[frame] if not sleepy else 1
+        rect(16, 4 + face_y, 2, 8, '#366a58')
+        rounded(8, 3 + face_y + leaf, 9, 6, '#35674e')
+        rect(10, 4 + face_y + leaf, 5, 3, '#9bdb8d')
+        rounded(17, 2 + face_y - leaf, 9, 6, '#35674e')
+        rect(19, 3 + face_y - leaf, 5, 3, '#b5e598')
+        rounded(7, 9 + face_y, 19, 12, ink)
+        rounded(8, 10 + face_y, 17, 9, glow)
+    else:
+        moonwalk = mood == 'groove'
+        for leg, (foot, shift) in enumerate(((9, stride), (20, -stride))):
+            phase = (frame + leg * 3) % 6
+            dx = (0, -2, -4, -3, -1, 0)[phase] if moonwalk else shift if moving else 0
+            lift = (1, 0, 0, 0, 2, 3)[phase] if moonwalk else 0
+            rect(foot + dx + 1, 21, 3, 4 - lift, ink)
+            rect(foot + dx, 24 - lift, 6, 3, ink)
+            rect(foot + dx + 1, 24 - lift, 4, 2, shade)
+            if moonwalk:
+                rect(foot + dx + 1, 25 - lift, 4, 1, '#a9ffdf')
+        if moonwalk:
+            arm = (0, 1, 2, 2, 1, 0)[frame]
+            rect(5, 18 + arm, 5, 3, ink)
+            rect(4, 17 + arm, 3, 4, glow)
+            rect(24, 18 - arm, 4, 3, ink)
+            rect(26, 16 - arm, 3, 4, glow)
+        rounded(8, 17 + y, 17, 8, ink)
+        rect(10, 18 + y, 13, 5, shade)
+        rect(14, 20 + y, 4, 2, '#f4c779')
+        face_y = y + (arc if mood == 'dance' else (0, 2, -1, 2, 0, -1)[frame] if mood == 'groove' else 0)
+        rounded(6, 8 + face_y, 21, 13, ink)
+        rounded(7, 9 + face_y, 19, 11, shade)
+        rect(10, 10 + face_y, 11, 1, glow)
+        rounded(9, 12 + face_y, 15, 7, '#26394f')
+        rect(16, 5 + face_y, 2, 4, ink)
+        sparkle(15, 3 + face_y, '#f6cf7b' if frame < 3 else '#f69498')
+
+    eye_y = (14 if kind in ('bunny', 'robot') else 15 if kind == 'cloud' else 13) + face_y
+    eye_positions = (12 + face_x,) if profile else (11, 20)
+    for ex in eye_positions:
+        closed = sleepy or blink_now or (mood == 'idle' and frame == 5)
+        rect(ex - int(closed), eye_y + int(closed), 4 if closed else 3, 1 if closed else 3, eye)
+        if mood == 'hungry':
+            rect(ex + 1, eye_y, 1, 1, '#fff6da')
+    if kind != 'robot':
+        rect(9 + face_x, 17 + face_y, 2, 1, '#f4a9bb')
+        if not profile:
+            rect(22, 17 + face_y, 2, 1, '#f4a9bb')
+    if mood in ('eat', 'hungry', 'surprised', 'tired'):
+        rect(15 + face_x, 17 + face_y, 2, 1 + frame % 3, eye)
+    elif kind != 'robot':
+        rect(15 + face_x, 18 + face_y, 2, 1, eye)
+    if mood == 'fidget':
+        if kind == 'ghost':
+            sparkle(3 + frame % 3, 10 - arc, '#ddc4ff')
+            sparkle(25, 6 + arc, '#ffd584')
+        elif kind == 'sprout':
+            sparkle(4, 8 - arc, '#a2d789')
+            rect(26, 10 + frame % 3, 2, 2, '#f7bbbc')
+        elif kind == 'robot':
+            rect(10, 13, 13, 5, '#26394f')
+            rect(10 + frame * 2, 13, 2, 5, '#a9ffdf')
+        elif kind == 'bunny':
+            oval(11 + arc, 22 - arc, 3, 2, shade)
+            oval(11 + arc, 21 - arc, 2, 1, glow)
+        else:
+            sparkle(26, 9 - arc, '#f2c879')
+            rect(9 + frame % 3, 22, 2, 1, '#b9a3ed')
+    if mood == 'look':
+        shift = (-1, -2, -1, 1, 2, 0)[frame]
+        face_color = '#26394f' if kind == 'robot' else glow
+        rect(9, eye_y, 15, 3, face_color)
+        for ex in (11, 20):
+            rect(ex + shift, eye_y, 2, 3, eye)
+    if music:
+        rect(11, 7 + face_y, 12, 1, '#735798')
+        for side in (7, 24):
+            rect(side, 12 + face_y, 3, 5, '#735798')
+            rect(side + 1, 13 + face_y, 1, 3, '#d6b8fa')
+        if mood in ('dance', 'groove'):
+            note = 27 if frame < 3 else 3
+            rect(note, 6 - frame % 3, 1, 5, '#efbe62')
+            rect(note - 1, 10 - frame % 3, 2, 1, '#efbe62')
+            rect(note, 6 - frame % 3, 3, 1, '#efbe62')
+    if sleepy:
+        sparkle(26, 6 - frame % 3, '#a988db')
+    elif mood in ('happy', 'surprised', 'stretch'):
+        sparkle(3, 7 - frame % 3, '#f4bd72')
+        sparkle(26, 5 + frame % 3, '#d796ce')
+    elif mood in ('eat', 'hungry'):
+        rect(24, 21 - frame % 3, 3, 2, '#edb067')
+        rect(24, 21 - frame % 3, 2, 1, '#ffe0a0')
+    return pixels
+
+def write_png(path, width, height, rows):
+    def chunk(tag, data):
+        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data))
+    header = struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)
+    path.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header)
+                     + chunk(b'IDAT', zlib.compress(b''.join(b'\0' + row for row in rows)))
+                     + chunk(b'IEND', b''))
+
+if __name__ == '__main__':
+    for kind in KINDS:
+        rows = []
+        rows_moods = MOODS + ('dance', 'groove', 'fidget', 'look')
+        for row, mood in enumerate(rows_moods):
+            frames = [draw(kind, mood, frame, blink_now=row in (len(MOODS), len(MOODS) + 1)) for frame in range(FRAMES)]
+            for y in range(SIZE):
+                rows.append(b''.join(frame[y * SIZE * 4:(y + 1) * SIZE * 4] for frame in frames))
+        write_png(Path('art') / (kind + '.png'), SIZE * FRAMES, SIZE * len(rows_moods), rows)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

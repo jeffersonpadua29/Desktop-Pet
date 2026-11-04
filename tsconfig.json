@@ -1,0 +1,2 @@
+{"compilerOptions":{"target":"ES2022","module":"Node16","moduleDetection":"legacy","types":["node"],"strict":true,"rootDir":"src","outDir":"dist","skipLibCheck":true,"noEmitOnError":true},"include":["src/*.ts"]}
+

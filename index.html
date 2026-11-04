@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'">
+<title>Anino</title>
+<link rel="stylesheet" href="style.css">
+<script defer src="dist/renderer.js"></script>
+</head>
+<body>
+<section id="panel" data-hit hidden aria-label="Pet controls">
+  <header class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>Pet Pocket</strong><span class="brand-edition">DESKTOP CLUB</span></header>
+  <form id="adopt" hidden>
+    <div class="adopt-intro"><span class="eyebrow">NEW GAME</span><h1>Pick your pet</h1><p>Choose a buddy and give them a name.</p></div>
+    <div class="roster" role="group" aria-label="Characters">
+      <button type="button" data-kind="anino" aria-pressed="true"><i class="mini"></i>Gremlin</button>
+      <button type="button" data-kind="cat" aria-pressed="false"><i class="mini"></i>Cat</button>
+      <button type="button" data-kind="dog" aria-pressed="false"><i class="mini"></i>Dog</button>
+      <button type="button" data-kind="chicken" aria-pressed="false"><i class="mini"></i>Chicken</button>
+      <button type="button" data-kind="ghost" aria-pressed="false"><i class="mini"></i>Ghost</button>
+      <button type="button" data-kind="sprout" aria-pressed="false"><i class="mini"></i>Sprout</button>
+      <button type="button" data-kind="robot" aria-pressed="false"><i class="mini"></i>Robot</button>
+      <button type="button" data-kind="bunny" aria-pressed="false"><i class="mini"></i>Bunny</button>
+      <button type="button" data-kind="cloud" aria-pressed="false"><i class="mini"></i>Cloud</button>
+    </div>
+    <label for="pet-nickname">Pet name</label>
+    <input id="pet-nickname" maxlength="20" placeholder="Anino" autocomplete="off" required>
+    <p id="adopt-error" aria-live="polite" hidden></p>
+    <button type="submit">Choose pet</button>
+    <button type="button" id="cancel-adopt" hidden>Back</button>
+  </form>
+  <div id="pet-home" hidden>
+    <div class="display">
+      <div id="portrait" aria-hidden="true"><span class="mini"></span></div>
+      <div class="pet-identity">
+        <span class="eyebrow" id="phase">Evening</span>
+        <h1 id="pet-name">Pet</h1>
+        <span id="pet-need" hidden></span>
+        <span id="playing" hidden>♫ Now playing</span>
+      </div>
+      <button id="pick-pet" type="button" title="Switch or rename pet" aria-label="Switch or rename pet">Pets <span aria-hidden="true">&#8644;</span></button>
+    </div>
+    <nav class="page-nav" aria-label="Pet pages">
+      <button type="button" data-page="care" aria-pressed="true">Care</button>
+      <button type="button" data-page="desk" aria-pressed="false">Desk</button>
+      <button type="button" data-page="alerts" aria-pressed="false">Alerts</button>
+      <button type="button" data-page="journal" aria-pressed="false">Journal</button>
+    </nav>
+    <section id="page-care" aria-label="Care">
+      <div id="stats">
+        <label>Fullness <meter id="food" min="0" max="100"></meter></label>
+        <label>Energy <meter id="energy" min="0" max="100"></meter></label>
+        <label>Bond <meter id="bond" min="0" max="100"></meter></label>
+      </div>
+      <div class="actions care">
+        <button data-action="feed"><span class="action-icon icon-feed" aria-hidden="true"></span>Feed</button>
+        <button data-action="pet"><span class="action-icon icon-pet" aria-hidden="true"></span>Pet</button>
+        <button id="sleep-control" data-action="sleep"><span class="action-icon icon-sleep" aria-hidden="true"></span><span id="sleep-label">Sleep</span></button>
+        <button data-action="throw"><span class="action-icon icon-ball" aria-hidden="true"></span>Throw Ball</button>
+      </div>
+      <p id="message" aria-live="polite">Something tiny has moved in.</p>
+    </section>
+    <section id="page-desk" aria-label="Desktop commands" hidden>
+      <h2>Quick launch</h2>
+      <form id="command"><input id="command-input" aria-label="Desktop command" placeholder="Try open Spotify" autocomplete="off"><button type="submit">Run</button></form>
+      <div class="shortcuts"><button data-command="open spotify">Spotify</button><button data-command="open downloads">Downloads</button><button data-command="open calculator">Calculator</button></div>
+      <p id="command-result" aria-live="polite" hidden></p>
+      <div class="notification-preview">
+        <button type="button" id="setup-notifications">Set up live alerts</button>
+        <button type="button" id="preview-notification">Preview pet alert</button>
+        <p>Live alerts require the Pet Pocket Notifications companion.</p>
+      </div>
+    </section>
+    <section id="page-alerts" aria-label="Recent alerts" hidden>
+      <div class="inbox-header"><h2>Recent alerts</h2><button type="button" id="clear-alerts" hidden>Clear history</button></div>
+      <p id="alerts-empty">No saved alerts yet.</p>
+      <ul id="alerts-list"></ul>
+    </section>
+    <section id="page-journal" aria-label="Journal and collection" hidden>
+      <h2>Collection</h2><p id="items"></p>
+      <h2>Adventure log</h2><ul id="journal"></ul>
+    </section>
+    <aside id="event" hidden>
+      <strong>The Shimmering Egg</strong>
+      <p>Crack it for a 40% shot at a Moonclip, or nest it until 6 AM for a Dawn Shard.</p>
+      <div class="actions"><button data-action="open">Crack it</button><button data-action="wait">Nest it</button></div>
+    </aside>
+  </div>
+</section>
+
+<div id="pet-alert" data-hit hidden><div role="status">
+  <strong id="pet-alert-heading"></strong>
+  <span id="pet-alert-message"></span></div>
+  <div class="alert-actions"><button type="button" id="open-alerts">Open alerts</button><button type="button" id="dismiss-alert">Dismiss</button></div>
+</div>
+<div id="toy-hint" hidden>Drag the ball and release <button type="button" id="cancel-toy" data-hit aria-label="Cancel throw">×</button></div>
+<button type="button" id="toy-ball" data-hit hidden aria-label="Drag and release to throw the ball"></button>
+<button id="pet" hidden data-hit aria-label="Anino. Click for controls or drag to move." aria-expanded="false">
+  <span class="sprite" aria-hidden="true"></span><span id="clip" hidden>+</span>
+  <span id="effect"></span>
+</button>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

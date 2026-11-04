@@ -1,0 +1,19 @@
+node_modules/
+dist/
+
+# Local Windows companion builds and signing files
+/windows-listener/bin/
+/windows-listener/obj/
+/windows-listener/AppPackages/
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.appxsym
+*.pfx
+*.p12
+*.cer
+*.pem
+*.key
+pet.json
+pet-alert.json
