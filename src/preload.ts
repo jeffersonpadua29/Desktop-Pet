@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('anino', {
+  onAssistantDraft: (callback: (text: string) => void) => ipcRenderer.on('assistant-draft', (_event, text) => callback(text)),
+  askPet: (turns: unknown, scope: string) => ipcRenderer.invoke('ask-pet', turns, scope),
+  assistantFile: (index: number, action: string) => ipcRenderer.invoke('assistant-file', index, action),
   setupNotifications: () => ipcRenderer.invoke('setup-notifications'),
   onAlert: (callback: (alert: { source: string; message: string; count: number }) => void) =>
     ipcRenderer.on('pet-alert', (_event, alert) => callback(alert)),
@@ -21,11 +24,12 @@ contextBridge.exposeInMainWorld('anino', {
   toyStage: (open: boolean) => ipcRenderer.invoke('toy-stage', open),
   hit: (interactive: boolean) => ipcRenderer.send('hit', interactive),
   drag: (phase: 'start' | 'move' | 'end') => ipcRenderer.send('drag', phase),
-  command: (input: string) => ipcRenderer.invoke('command', input),
   select: (kind: string, name: string) => ipcRenderer.invoke('select-pet', kind, name),
   status: () => ipcRenderer.invoke('status'),
   act: (action: string) => ipcRenderer.invoke('act', action),
 });
+
+
 
 
 

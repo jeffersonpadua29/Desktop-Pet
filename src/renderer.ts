@@ -10,7 +10,14 @@ type Routine = import('./routines').Routine;
 type RoutineState = import('./routines').RoutineState;
 type Companion = ReturnType<typeof import('./pet').companionDetails>;
 type HomeSnapshot = { pet: Snapshot | null; playing: boolean; names: Partial<Record<Species, string>>; preferences: Preferences; quietHoursActive: boolean; weather: WeatherState; routines: Routine[]; routine: RoutineState; companion: Companion | null; todos: import('./todos').Todo[] };
+type AskTurn = { role: 'user' | 'assistant'; content: string };
+type AskFile = { name: string; folder: string; modified: number; canOpen: boolean };
+type AskReply = { message: string; mood?: string; files?: AskFile[] };
+
 const api = (window as Window & { anino?: {
+  onAssistantDraft: (callback: (text: string) => void) => void;
+  askPet: (turns: AskTurn[], scope: string) => Promise<AskReply>;
+  assistantFile: (index: number, action: string) => Promise<string>;
   setupNotifications: () => Promise<boolean>;
   onAlert: (callback: (alert: { source: string; message: string; count: number; silent: boolean; kind?: 'desktop' | 'weather' | 'reminder' }) => void) => void;
   onOpenControls: (callback: () => void) => void;
@@ -32,7 +39,6 @@ const api = (window as Window & { anino?: {
   drag: (phase: 'start' | 'move' | 'end') => void;
   status: () => Promise<HomeSnapshot>;
   select: (kind: Species, name: string) => Promise<HomeSnapshot>;
-  command: (input: string) => Promise<{ message: string; mood?: string }>;
   act: (action: string) => Promise<{ pet: Snapshot; mood: string; message: string }>;
 } }).anino!;
 const petButton = document.querySelector<HTMLButtonElement>('#pet')!;
@@ -606,29 +612,6 @@ adoptForm.addEventListener('submit', async event => {
 void refresh();
 setInterval(refresh, 500);
 
-const commandInput = document.querySelector<HTMLInputElement>('#command-input')!;
-async function runCommand(input: string) {
-  const output = document.querySelector<HTMLElement>('#command-result')!;
-  output.hidden = false;
-  try {
-    const result = await api.command(input);
-    output.textContent = result.message;
-    if (result.mood && !playing) {
-      reactionUntil = Date.now() + 1500;
-      petButton.dataset.mood = result.mood;
-    }
-  } catch {
-    output.textContent = 'The desktop command could not run.';
-  }
-}
-document.querySelector('#command')!.addEventListener('submit', event => {
-  event.preventDefault();
-  if (commandInput.value.trim()) void runCommand(commandInput.value);
-});
-for (const shortcut of document.querySelectorAll<HTMLButtonElement>('[data-command]')) {
-  shortcut.addEventListener('click', () => { void runCommand(shortcut.dataset.command!); });
-}
-
 
 
 const pageButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-page]')];
@@ -964,7 +947,98 @@ companionEditor.addEventListener('submit', async event => {
 
 document.querySelector('#setup-notifications')!.addEventListener('click', async () => {
   if (await api.setupNotifications()) return;
-  const result = document.querySelector<HTMLElement>('#command-result')!;
+  const result = document.querySelector<HTMLElement>('#notification-setup-result')!;
   result.textContent = 'Notification setup bundle unavailable. See SETUP.md.';
   result.hidden = false;
 });
+
+const askForm = document.querySelector<HTMLFormElement>('#ask-form')!;
+const askInput = document.querySelector<HTMLInputElement>('#ask-input')!;
+const askSend = document.querySelector<HTMLButtonElement>('#ask-send')!;
+const askScope = document.querySelector<HTMLSelectElement>('#ask-scope')!;
+const askChat = document.querySelector<HTMLElement>('#ask-chat')!;
+const askStream = document.querySelector<HTMLElement>('#ask-stream')!;
+const askEmpty = document.querySelector<HTMLElement>('#ask-empty')!;
+const askFiles = document.querySelector<HTMLElement>('#ask-files')!;
+const askStatus = document.querySelector<HTMLElement>('#ask-status')!;
+const askDraft = document.createElement('p');
+askDraft.dataset.role = 'assistant';
+askDraft.hidden = true;
+api.onAssistantDraft(text => {
+  if (!askSend.disabled) return;
+  if (!text) { askDraft.remove(); return; }
+  askDraft.hidden = false;
+  askDraft.textContent = text;
+  if (!askDraft.isConnected) askChat.append(askDraft);
+  askStatus.textContent = 'Responding…';
+  askStream.scrollTop = askStream.scrollHeight;
+});
+const askTurns: AskTurn[] = [];
+
+function addAskTurn(role: AskTurn['role'], content: string) {
+  askTurns.push({ role, content });
+  if (askTurns.length > 20) askTurns.shift();
+  const bubble = document.createElement('p');
+  bubble.dataset.role = role;
+  bubble.textContent = content;
+  askChat.append(bubble);
+  askEmpty.hidden = true;
+  if (askChat.children.length > 20) askChat.firstElementChild?.remove();
+  askStream.scrollTop = askStream.scrollHeight;
+}
+
+function showAskFiles(files: AskFile[]) {
+  askFiles.replaceChildren(...files.map((file, index) => {
+    const item = document.createElement('li');
+    const title = document.createElement('strong');
+    title.textContent = file.name;
+    const details = document.createElement('p');
+    details.textContent = file.folder + ' · Modified ' + new Date(file.modified).toLocaleString();
+    const actions = document.createElement('div');
+    actions.className = 'settings-row';
+    const addAction = (label: string, action: string) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', async () => {
+        try { askStatus.textContent = await api.assistantFile(index, action); }
+        catch { askStatus.textContent = 'Windows could not open that file.'; }
+      });
+      actions.append(button);
+    };
+    if (file.canOpen) addAction('Open file', 'open');
+    addAction('Open in VS Code', 'vscode');
+    addAction('Show in folder', 'reveal');
+    item.append(title, details, actions);
+    return item;
+  }));
+  if (files.length) askFiles.firstElementChild?.scrollIntoView({ block: 'nearest' });
+}
+
+askForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const question = askInput.value.trim();
+  if (!question || askSend.disabled) return;
+  askSend.disabled = true;
+  askFiles.replaceChildren();
+  askInput.value = '';
+  addAskTurn('user', question);
+  askStatus.textContent = 'Thinking on this PC…';
+  try {
+    const reply = await api.askPet(askTurns, askScope.value);
+    askDraft.remove();
+    askStatus.textContent = '';
+    addAskTurn('assistant', reply.message);
+    if (reply.files) showAskFiles(reply.files);
+    if (reply.mood) {
+      reactionUntil = Date.now() + 1300;
+      petButton.dataset.mood = reply.mood;
+    }
+  } catch {
+    askStatus.textContent = 'The request did not finish. Try again.';
+  } finally {
+    askDraft.remove();
+    askSend.disabled = false;
+  }
+});
+

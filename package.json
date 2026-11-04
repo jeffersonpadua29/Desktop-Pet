@@ -15,9 +15,13 @@
   "author": "",
   "type": "commonjs",
   "main": "dist/main.js",
+  "config": {
+    "ollama_model": "qwen3:4b-instruct"
+  },
   "scripts": {
     "build": "tsc",
-    "start": "npm run build && electron .",
+    "start": "node setup/start.cjs",
+    "setup:ai": "node setup/start.cjs --ai-only",
     "setup:notifications": "powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File setup/Install-Notifications.ps1"
   },
   "devDependencies": {

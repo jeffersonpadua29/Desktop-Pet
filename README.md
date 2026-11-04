@@ -6,10 +6,9 @@ See the [Windows setup guide](SETUP.md) for the desktop app, live notifications,
 
 ## Run on Windows
 
-With Node.js and npm cied, open a terminal in this folder.
+Install Node.js LTS, then open a terminal in the cloned project folder.
 
 ```powershell
-npm ci
 npm start
 ```
 
@@ -20,11 +19,11 @@ npm start
 - Left-click the Anino tray icon to toggle **Quiet Mode**. Right-click it to quit. Windows may tuck the icon under the tray overflow arrow.
 - Progress saves locally. Time away counts for at most six hours of stat decay per return.
 
-The app runs offline after dependency installation.
+On first run, `npm start` installs the locked npm dependencies and sets up Ollama and Qwen for Ask Pet. The model download is about 2.5 GB. Later starts reuse the installed model and can run offline. See the [setup guide](SETUP.md#local-ai-with-qwen) for details.
 
-## Desk tools
+## Ask Pet
 
-Type **open Spotify**, **open Downloads**, or **open Calculator** in the command box. The shortcut buttons run those same commands. **Buksan** also works in place of **open**.
+Use **Ask** to chat with Qwen, create or find local files, open files in VS Code, and control supported desktop apps.
 
 Anino puts on headphones when you launch Spotify and dances while the Spotify desktop app reports active playback to Windows. The dance has its own loop. The clock badge and idle behavior use your PC's local time.
 
@@ -34,7 +33,7 @@ At first launch, choose a pixel gremlin, cat, dog, chicken, ghost, sprout, robot
 
 ## Windows notification companion
 
-Choose **Set up live alerts** on first launch or from **Desk** to install the bundled x64 companion. The [setup guide](SETUP.md#live-notifications-from-a-clone) explains the two Windows approvals and the maintainer build steps.
+Choose **Set up live alerts** on first launch or from **Alerts** to install the bundled x64 companion. The [setup guide](SETUP.md#live-notifications-from-a-clone) explains the Windows approvals and the maintainer build steps.
 
 
 

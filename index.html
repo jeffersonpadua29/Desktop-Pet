@@ -46,7 +46,7 @@
     </div>
     <nav class="page-nav" aria-label="Pet pages">
       <button type="button" data-page="care" aria-pressed="true">Care</button>
-      <button type="button" data-page="desk" aria-pressed="false">Desk</button>
+      <button type="button" data-page="ask" aria-pressed="false">Ask</button>
       <button type="button" data-page="alerts" aria-pressed="false">Alerts</button>
       <button type="button" data-page="todos" aria-pressed="false">To-do</button>
       <button type="button" data-page="journal" aria-pressed="false">Journal</button>
@@ -66,18 +66,25 @@
       </div>
       <p id="message" aria-live="polite">Something tiny has moved in.</p>
     </section>
-    <section id="page-desk" aria-label="Desktop commands" hidden>
-      <h2>Quick launch</h2>
-      <form id="command"><input id="command-input" aria-label="Desktop command" placeholder="Try open Spotify" autocomplete="off"><button type="submit">Run</button></form>
-      <div class="shortcuts"><button data-command="open spotify">Spotify</button><button data-command="open downloads">Downloads</button><button data-command="open calculator">Calculator</button></div>
-      <p id="command-result" aria-live="polite" hidden></p>
-      <div class="notification-preview">
-        <button type="button" id="setup-notifications">Set up live alerts</button>
-        <button type="button" id="preview-notification">Preview pet alert</button>
-        <p>Live alerts require the Pet Pocket Notifications companion.</p>
+    <section id="page-ask" aria-label="Ask Pet" hidden>
+      <div class="ask-heading"><h2>Ask Pet</h2><span class="ask-local">LOCAL · QWEN3</span></div>
+      <div id="ask-stream" tabindex="0" aria-label="Conversation and file results">
+        <p id="ask-empty">Chat, create or find files, and manage Windows apps.</p>
+        <div id="ask-chat" role="log" aria-label="Conversation" aria-live="polite"></div>
+        <ul id="ask-files" aria-label="File results"></ul>
       </div>
+      <form id="ask-form">
+        <div class="ask-compose"><input id="ask-input" aria-label="Message your pet" placeholder="Message your pet…" maxlength="600" autocomplete="off" required><button type="submit" id="ask-send">Send</button></div>
+        <div class="ask-scope-row"><label for="ask-scope">File search</label><select id="ask-scope"><option value="all">Desktop, Documents &amp; Downloads</option><option value="downloads">Downloads</option><option value="documents">Documents</option><option value="desktop">Desktop</option></select></div>
+        <p id="ask-status" role="status"></p>
+      </form>
     </section>
     <section id="page-alerts" aria-label="Recent alerts" hidden>
+      <div class="notification-preview">
+        <h2>Windows alerts</h2>
+        <div class="settings-row"><button type="button" id="setup-notifications">Set up live alerts</button><button type="button" id="preview-notification">Preview pet alert</button></div>
+        <p id="notification-setup-result" role="status" hidden></p>
+      </div>
       <div class="weather-card">
         <h2>Local weather</h2>
         <p id="weather-location">Choose your location below.</p>
@@ -184,6 +191,9 @@
 </button>
 </body>
 </html>
+
+
+
 
 
 

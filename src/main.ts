@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
-import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { findFiles, interpret, saveGeneratedFile, type FileMatch, type Intent, type SpotifyContext, type Turn } from './assistant';
+import { execFile, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { act, advance, fresh, isSpecies, companionDetails, customizePet, type Pet, type Species } from './pet';
 import { defaultPreferences, normalizePreferences, isQuietTime } from './settings';
@@ -266,11 +268,61 @@ function closeToyStage() {
   toyHome = undefined;
 }
 
+async function launchVSCode(file?: string) {
+  if (file) {
+    if (!statSync(file, { throwIfNoEntry: false })?.isFile()) return 'This file is no longer available.';
+    const url = pathToFileURL(file);
+    const path = url.host ? '//' + url.host + url.pathname : url.pathname;
+    try {
+      await shell.openExternal('vscode://file' + path);
+      return '';
+    } catch {
+      return 'Windows couldn’t send this file to VS Code. Check that the desktop version of VS Code is installed.';
+    }
+  }
+  const standardFolders = [
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs'),
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+  ];
+  const executables = standardFolders
+    .filter((folder): folder is string => Boolean(folder))
+    .map(folder => join(folder, 'Microsoft VS Code', 'Code.exe'));
+  for (const entry of (process.env.PATH ?? '').split(delimiter)) {
+    const folder = entry.trim().replace(/^"|"$/g, '');
+    if (!isAbsolute(folder)) continue;
+    executables.push(join(folder, 'Code.exe'));
+    if (existsSync(join(folder, 'code.cmd'))) executables.push(join(folder, '..', 'Code.exe'));
+  }
+  const executable = executables.find(path => statSync(path, { throwIfNoEntry: false })?.isFile());
+  if (!executable) return 'I couldn’t find VS Code. Check that it’s installed or available on PATH.';
+  return new Promise<string>(resolve => {
+    const editor = spawn(executable, [], { detached: true, stdio: 'ignore' });
+    editor.once('error', () => resolve('Windows couldn’t launch VS Code.'));
+    editor.once('spawn', () => {
+      editor.unref();
+      resolve('');
+    });
+  });
+}
+
 async function command(input: string) {
   const value = input.trim().toLowerCase().replace(/\s+/g, ' ');
   const target = value.replace(/^(open|buksan) /, '');
   try {
     switch (target) {
+      case 'arduino':
+      case 'arduino ide': {
+        const arduino = [
+          process.env.ProgramFiles,
+          process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs'),
+        ].filter((directory): directory is string => Boolean(directory))
+          .map(directory => join(directory, 'Arduino IDE', 'Arduino IDE.exe'))
+          .find(path => existsSync(path));
+        if (!arduino) return { message: 'I couldn’t find Arduino IDE in its standard Windows install locations.' };
+        if (await shell.openPath(arduino)) return { message: 'Windows could not launch Arduino IDE.' };
+        return { message: 'Sent the launch request to Arduino IDE.' };
+      }
       case 'spotify':
         await shell.openExternal('spotify:');
         return { message: 'Opening Spotify.', mood: 'headphones' };
@@ -282,11 +334,187 @@ async function command(input: string) {
       case 'calculator':
         await shell.openExternal('calculator:');
         return { message: 'Calculator opened.' };
+      case 'vscode':
+      case 'vs code':
+      case 'visual studio code':
+        return { message: await launchVSCode() || 'Opening VS Code.' };
       default:
-        return { message: 'Try open Spotify, open Downloads, or open Calculator.' };
+        return { message: 'Available shortcuts are Spotify, Arduino IDE, VS Code, Downloads, and Calculator.' };
     }
   } catch {
     return { message: 'Windows could not open ' + target + '.' };
+  }
+}
+
+async function closeSpotify() {
+  return new Promise<{ message: string }>(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'spotify-window.ps1')],
+      { windowsHide: true, timeout: 12000 }, (error, stdout) => {
+        if (error) { resolve({ message: 'Windows could not close Spotify.' }); return; }
+        switch (stdout.trim()) {
+          case 'closed': resolve({ message: 'The Spotify window is closed. Spotify may still run in the tray.' }); break;
+          case 'not-open': resolve({ message: 'I couldn’t find an open Spotify window.' }); break;
+          case 'still-open': resolve({ message: 'I asked Spotify to close, but its window is still open.' }); break;
+          default: resolve({ message: 'Windows could not close Spotify.' });
+        }
+      });
+  });
+}
+
+async function controlDesktop(intent: Extract<Intent, { type: 'window' }>) {
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    join(root, 'desktop-window.ps1'), '-Action', intent.action, '-OwnerProcess', String(process.pid)];
+  if (intent.action !== 'list') args.push('-EncodedTarget', Buffer.from(intent.target).toString('base64'));
+  const result = await new Promise<{ status: string; titles: string[]; more: boolean } | null>(resolve => {
+    execFile('powershell.exe', args, { windowsHide: true, timeout: 7000 }, (error, stdout) => {
+      if (error) { resolve(null); return; }
+      try { resolve(JSON.parse(stdout.replace(/^\uFEFF/, ''))); }
+      catch { resolve(null); }
+    });
+  });
+  if (!result) return { message: 'Windows didn’t respond to the desktop command.' };
+  const titleList = result.titles.map(title => '“' + title + '”').join(', ') + (result.more ? ', and more' : '');
+  switch (result.status) {
+    case 'listed': return { message: result.titles.length ? 'Open windows include ' + titleList + '.' : 'I couldn’t find any open app windows.' };
+    case 'missing': return { message: 'I couldn’t find an open window with that name.' };
+    case 'ambiguous': return { message: 'More than one window matches. Repeat the command with a specific title. ' + titleList + '.' };
+    case 'done': {
+      const past = { focus: 'Switched to', minimize: 'Minimized', maximize: 'Maximized', restore: 'Restored', list: 'Found' };
+      return { message: past[intent.action] + ' ' + titleList + '.' };
+    }
+    default: return { message: 'I found ' + titleList + ' but couldn’t confirm that Windows completed the action.' };
+  }
+}
+
+const fileScopes = ['downloads', 'documents', 'desktop'] as const;
+let assistantFiles: FileMatch[] = [];
+type EditorFile = Pick<FileMatch, 'name' | 'path'>;
+let fileConversation: { pet: Pet; files: FileMatch[]; selected?: EditorFile } | undefined;
+let assistantPending = false;
+let spotifyConversation: (SpotifyContext & { pet: Pet; at: number }) | undefined;
+
+async function openAssistantFileInVSCode(pet: Pet, intent: Extract<Intent, { type: 'open-in-vscode' }>) {
+  const context = fileConversation?.pet === pet ? fileConversation : undefined;
+  let file = context?.selected ?? (context?.files.length === 1 ? context.files[0] : undefined);
+  const name = intent.name ?? (intent.folder ? file?.name : undefined);
+  if (name !== undefined) {
+    const key = name.toLowerCase();
+    const matches = intent.folder ? [] : context?.files.filter(item => item.name.toLowerCase() === key) ?? [];
+    if (matches.length > 1) return 'I found multiple files named “' + name + '”. Use Open in VS Code on the result you want.';
+    file = matches[0];
+    if (!file) {
+      const documents = app.getPath('documents');
+      const savedFiles = join(documents, 'Pet Pocket');
+      for (const folder of intent.folder ? [documents, savedFiles] : [savedFiles]) {
+        if (!existsSync(folder)) continue;
+        const entry = readdirSync(folder, { withFileTypes: true }).find(item => item.isFile() && item.name.toLowerCase() === key);
+        if (!entry) continue;
+        file = { name: entry.name, path: join(folder, entry.name) };
+        break;
+      }
+    }
+    if (!file) {
+      const searched = intent.folder ? 'Documents or Documents → Pet Pocket' : 'the latest results or Documents → Pet Pocket';
+      return 'I couldn’t find “' + name + '” in ' + searched + '. Ask me to find it first.';
+    }
+  }
+  if (!file) return 'Which file should I open in VS Code? Give me the filename.';
+  const error = await launchVSCode(file.path);
+  if (error) return error;
+  fileConversation = { pet, files: context?.files ?? [], selected: file };
+  return 'Sent “' + file.name + '” to VS Code through Windows.';
+}
+
+async function askPet(input: unknown, scope: unknown) {
+  const pet = currentPet();
+  if (!pet || !Array.isArray(input) || !input.length || assistantPending) return { message: 'Choose a pet or wait for the current request.' };
+  if (scope !== 'all' && scope !== 'downloads' && scope !== 'documents' && scope !== 'desktop') return { message: 'Choose a search folder first.' };
+  const turns: Turn[] = [];
+  for (const entry of input.slice(-7)) {
+    if ((entry?.role === 'user' || entry?.role === 'assistant') && typeof entry.content === 'string') {
+      turns.push({ role: entry.role, content: entry.content.slice(0, 1600) });
+    }
+  }
+  if (turns.at(-1)?.role !== 'user' || !turns.at(-1)?.content.trim()) return { message: 'Type a question or command first.' };
+  assistantPending = true;
+  assistantFiles = [];
+  const spotify = spotifyConversation?.pet === pet && Date.now() - spotifyConversation.at < 5 * 60_000
+    ? spotifyConversation : undefined;
+  spotifyConversation = undefined;
+  try {
+    let lastDraft = '';
+    let lastDraftAt = 0;
+    const petContext = { name: pet.name, food: pet.food, energy: pet.energy, bond: pet.bond, asleep: Boolean(pet.nap) };
+    const intent = await interpret(turns, petContext, scope === 'all' ? 'Desktop, Documents and Downloads' : scope, text => {
+      if (text === lastDraft || (text && Date.now() - lastDraftAt < 75) || win.isDestroyed()) return;
+      lastDraft = text;
+      lastDraftAt = Date.now();
+      win.webContents.send('assistant-draft', text);
+    }, spotify);
+    if (intent.type === 'reply') {
+      spotifyConversation = spotify;
+      return { message: intent.message };
+    }
+    if (intent.type === 'window') return await controlDesktop(intent);
+    if (intent.type === 'open-in-vscode') {
+      const message = await openAssistantFileInVSCode(pet, intent);
+      assistantFiles = fileConversation?.pet === pet ? fileConversation.files : [];
+      return { message, files: assistantFiles.map(({ name, folder, modified, canOpen }) => ({ name, folder, modified, canOpen })) };
+    }
+    if (intent.type === 'launch') {
+      const result = await command(intent.target);
+      if (intent.target === 'spotify' && result.mood === 'headphones') spotifyConversation = { pet, at: Date.now() };
+      return result;
+    }
+    if (intent.type === 'spotify-search') {
+      const query = encodeURIComponent(Buffer.from(intent.query).toString('utf8'));
+      const playback = intent.play ? ' Select a track in Spotify to start playback.' : '';
+      try {
+        await shell.openExternal('spotify:search:' + query);
+        spotifyConversation = { pet, query: intent.query, at: Date.now() };
+        return { message: 'Searching Spotify for “' + intent.query + '”.' + playback, mood: 'headphones' };
+      } catch {
+        await shell.openExternal('https://open.spotify.com/search/' + query);
+        spotifyConversation = { pet, query: intent.query, at: Date.now() };
+        return { message: 'Opened Spotify search for “' + intent.query + '” in your browser.' + playback };
+      }
+    }
+    if (intent.type === 'close') return closeSpotify();
+    if (intent.type === 'care') {
+      if (pet !== currentPet()) return { message: 'Your active pet changed. Ask again.' };
+      const reaction = act(pet, intent.action, Date.now());
+      save();
+      return reaction;
+    }
+    if (intent.type === 'create-file') {
+      try {
+        const { name, folder, path, modified, canOpen } = await saveGeneratedFile(app.getPath('documents'), intent.file);
+        assistantFiles = [{ name, folder, path, modified, canOpen }];
+        fileConversation = { pet, files: assistantFiles };
+        return { message: 'Saved “' + name + '” in Documents → Pet Pocket.', files: [{ name, folder, modified, canOpen }] };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          return { message: 'A file with that name already exists in Documents → Pet Pocket. Ask me to use another filename.' };
+        }
+        return { message: 'Windows couldn’t save the file in Documents → Pet Pocket.' };
+      }
+    }
+    if (intent.type === 'find') {
+      const folders = scope === 'all' ? fileScopes : [scope] as const;
+      const roots = folders.map(folder => app.getPath(folder));
+      const result = await findFiles(roots, intent.search);
+      assistantFiles = result.files;
+      fileConversation = { pet, files: assistantFiles };
+      return {
+        message: (result.files.length ? 'I found these possible matches.' : 'I didn’t find a match. Try a shorter keyword or a different folder.')
+          + (result.limited ? ' The search hit its scan limit, so some folders may still have matches.' : ''),
+        files: result.files.map(({ name, folder, modified, canOpen }) => ({ name, folder, modified, canOpen })),
+      };
+    }
+  } catch {
+    return { message: 'I could not complete that request. Try again.' };
+  } finally {
+    assistantPending = false;
   }
 }
 
@@ -470,7 +698,21 @@ else app.whenReady().then(() => {
   media.stderr.on('data', chunk => console.error(String(chunk).trim()));
   media.on('error', error => console.error('Media monitor:', error.message));
   media.on('exit', () => { playing = false; });
-  ipcMain.handle('command', (_event, input: string) => command(input));
+  ipcMain.handle('ask-pet', (_event, input: unknown, scope: unknown) => askPet(input, scope));
+  ipcMain.handle('assistant-file', async (_event, index: unknown, action: unknown) => {
+    if (typeof index !== 'number' || !Number.isInteger(index)) return 'File selection is unavailable.';
+    const file = assistantFiles[index];
+    if (!file || !existsSync(file.path)) return 'This file is no longer available.';
+    if (action === 'reveal') { shell.showItemInFolder(file.path); return ''; }
+    if (action === 'open' && file.canOpen) return shell.openPath(file.path);
+    if (action === 'vscode') {
+      const context = fileConversation;
+      const error = await launchVSCode(file.path);
+      if (!error && context && context === fileConversation && context.pet === currentPet()) context.selected = file;
+      return error;
+    }
+    return 'Choose Show in folder for this file.';
+  });
   ipcMain.handle('setup-notifications', launchNotificationSetup);
   ipcMain.handle('status', status);
   ipcMain.handle('preferences', (_event, input: unknown) => changePreferences(input));
@@ -569,6 +811,11 @@ else app.whenReady().then(() => {
     save();
   });
 });
+
+
+
+
+
 
 
 

@@ -1,6 +1,6 @@
 # Pet Pocket setup for Windows
 
-Pet Pocket has two parts. The desktop pet runs through Electron. The optional Pet Pocket Notifications companion reads Windows alerts after you grant it access. You can run and develop the pet without installing the companion.
+Pet Pocket runs through Electron and uses Ollama with Qwen for local AI in **Ask**. The optional Pet Pocket Notifications companion reads Windows alerts after you grant it access.
 
 ## 1. Run the desktop pet
 
@@ -19,26 +19,35 @@ git clone $repoUrl pet-pocket
 Set-Location pet-pocket
 ```
 
-The project is already initialized. **`package.json`** declares the dependencies and **`package-lock.json`** records their versions. `npm init` creates a manifest for a new project. Here, **`npm ci` creates `node_modules` and installs the locked dependencies**. Commit both JSON files so collaborators can run the same install.
+Run this from the folder that contains `package.json`.
 
 ```powershell
-npm ci
-Test-Path node_modules
 npm start
 ```
 
-`Test-Path` should print `True` after a successful install. If npm says it cannot find `package.json`, check that you are in the project folder. If it says the lockfile is missing, make sure `package-lock.json` was included in the checkout.
+`npm start` runs `npm ci` when the dependencies are missing or the lockfile changed, builds the app, and sets up [local AI with Qwen](#local-ai-with-qwen). The first run needs internet access for npm, Electron, and the model download. Keep `package.json` and `package-lock.json` together in Git.
 
-
-The first install and launch need internet access for dependencies and the Electron runtime. Click the pet to open the controls. To restart after a code change, right-click the Pet Pocket tray icon, choose **Quit Anino**, and run `npm start` again. The tray icon may be in the overflow menu.
+After `git pull`, quit the running pet from its Windows tray icon and run `npm start` again. The tray icon may be in the overflow menu.
 
 Use `npm run build` to check TypeScript without launching the app. The checked-in PNGs are ready to use. If you edit the sprite generator, run `python art/draw_sprites.py` from the repository root to rebuild the sheets.
+
+## Local AI with Qwen
+
+On startup, Pet Pocket checks the Ollama server at `127.0.0.1:11434` for `qwen3:4b-instruct`. If needed, it installs Ollama for the current Windows account using WinGet, starts the local server, and downloads the model. The first model download is about 2.5 GB and shows progress in the terminal. A model that is already installed is reused. [Ollama for Windows](https://docs.ollama.com/windows) · [Qwen model](https://ollama.com/library/qwen3:4b-instruct)
+
+If WinGet is unavailable or setup fails, the pet still opens. Install Ollama manually if needed, then retry the AI setup with the command below. Use `npm start -- --skip-ai` to start the pet without running AI setup. [Ollama Windows installer](https://ollama.com/download/windows)
+
+```powershell
+npm run setup:ai
+```
+
+Choose a pet and open **Ask**. Qwen handles chat and tool requests locally. Created files go to **Documents → Pet Pocket**. File search uses the selected Windows folders, and you can open a result in Explorer or the desktop version of VS Code. Chat history stays in the running app session.
 
 ## Live notifications from a clone
 
 The repository includes an x64 development bundle at `setup/PetPocket-Notifications-x64.zip`. Keep that ZIP, `setup/notification-bundle.json`, and `setup/Install-Notifications.ps1` together when you push to GitHub. The ZIP includes the signed companion, its public certificate, and its Microsoft runtime dependencies.
 
-1. Run `npm ci` and `npm start`. On the first launch, choose **Set up live alerts**. If you choose **Later**, you can start setup from **Desk → Set up live alerts** or by running `npm run setup:notifications`.
+1. Run `npm start`. On the first launch, choose **Set up live alerts**. If you choose **Later**, open **Alerts → Set up live alerts** or run `npm run setup:notifications`.
 2. Read the certificate prompt and choose **Yes** if you trust the source. Approve the Windows administrator prompt. Setup installs the companion and opens it.
 3. In **Pet Pocket Notifications**, click **Connect notifications → Allow**. Turn on **Include message previews** if you want message text.
 4. Send a new Windows notification while the pet is visible and Quiet Mode is off.
@@ -141,7 +150,7 @@ Get-AppxPackage -Name PetPocket.NotificationListener | Select-Object Name, Statu
 4. Start Pet Pocket with `npm start`. Select a pet and turn off Quiet Mode for the test.
 5. Trigger a new Windows toast, such as a calendar reminder. Your pet should show a **Boss** bubble. Open **Alerts** to reread it.
 
-**Desk → Preview pet alert** checks the bubble only. A real toast checks the companion and Windows permissions. The listener receives Windows app notifications, including browser alerts that the browser forwards to Windows. [Windows notification access](https://learn.microsoft.com/en-us/windows/apps/develop/notifications/app-notifications/notification-listener)
+**Alerts → Preview pet alert** checks the bubble only. A real toast checks the companion and Windows permissions. The listener receives Windows app notifications, including browser alerts that the browser forwards to Windows. [Windows notification access](https://learn.microsoft.com/en-us/windows/apps/develop/notifications/app-notifications/notification-listener)
 
 ### Troubleshooting
 
@@ -158,5 +167,8 @@ Get-AppxPackage -Name PetPocket.NotificationListener | Select-Object Name, Statu
 Commit the application source, `package-lock.json`, sprite PNGs, and the `windows-listener` project, manifest, and assets. The repository already contains the inputs needed to rebuild both parts. Collaborators use the installer links above to get the tools and generate their local signing certificate.
 
 Keep generated builds, loose certificate files, private keys, pet saves, and notification history local. The checked-in development ZIP is the exception for collaborators. It contains the public certificate and signed package. The private key stays in the Windows account used to sign it. The development certificate is for local testing. For a shared installer, publish a release signed through a trusted code-signing process or the Microsoft Store. [Microsoft guidance on signing MSIX packages](https://learn.microsoft.com/en-us/windows/msix/package/sign-msix-package-guide)
+
+
+
 
 

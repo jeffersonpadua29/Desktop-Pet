@@ -3,9 +3,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { fresh } = require('../dist/pet');
 
-async function start(saved, weatherOverrides = {}) {
+async function start(saved, weatherOverrides = {}, overrides = {}) {
   const ipc = {}, events = {}, files = {}, alerts = [], intervals = [];
   let windowsAlert;
   let window, menu;
@@ -46,7 +47,9 @@ async function start(saved, weatherOverrides = {}) {
     './weather':{...require('../dist/weather'),detectLocation:async()=>location,searchLocations:async()=>[location],fetchWeather:async()=>({summary:'Rain',temperature:25,updated:Date.now(),hazard:'rain',advisory:'Rain soon.'}),...weatherOverrides},
   };
   const context = vm.createContext({
-    require:name=>mocks[name] || require(name.startsWith('.') ? path.join(__dirname,'../dist',name) : name),
+    require:name=>overrides.modules?.[name]
+      ? { ...mocks[name], ...overrides.modules[name] }
+      : mocks[name] || require(name.startsWith('.') ? path.join(__dirname,'../dist',name) : name),
     exports:{},__dirname:path.join(__dirname,'../dist'),process:{arch:'x64'},console,
     setInterval:fn=>{intervals.push(fn);return {fn};},clearInterval:()=>{},
   });
@@ -56,6 +59,50 @@ async function start(saved, weatherOverrides = {}) {
     tickReminders:()=>intervals.find(fn=>fn.name==='checkTodoReminders')(),
     desktopAlert:input=>{windowsAlert=input;intervals.find(fn=>fn.name==='pollWindowsAlerts')();}};
 }
+
+test('Ask Pet opens its last generated file in VS Code and keeps the file card available', async t => {
+  const assistant = require('../dist/assistant');
+  const documents = path.join(path.sep, 'virtual', 'documents');
+  const folder = path.join(documents, 'Pet Pocket');
+  const file = { name: 'sort.c', folder, path: path.join(folder, 'sort.c'), modified: 1, canOpen: false };
+  const otherName = 'main #1.c';
+  const otherFile = path.join(documents, otherName);
+  const launches = [];
+  let rejectLaunch = false;
+  const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json({
+    message: { tool_calls: [{ function: { name: 'create_file', arguments: { name: file.name, content: 'int x;' } } }] },
+  }));
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    modules: {
+      './assistant': { ...assistant, saveGeneratedFile: async () => file },
+      'node:fs': {
+        existsSync: target => [documents, folder, file.path].includes(path.normalize(target)),
+        readdirSync: target => [{ name: path.normalize(target) === documents ? otherName : file.name, isFile: () => true }],
+        statSync: target => [file.path, otherFile].includes(target) ? { isFile: () => true } : undefined,
+      },
+      electron: {
+        shell: { openExternal: async url => {
+          if (rejectLaunch) throw new Error('No Windows handler');
+          launches.push(url);
+        } },
+      },
+    },
+  });
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  assert.match((await ask('open sort.c in my document folder using vscode')).message, /Sent “sort.c” to VS Code/);
+  assert.match((await ask('open "main #1.c" in Documents with VS Code')).message, /Sent “main #1.c” to VS Code/);
+  assert.match((await ask('Generate sort.c with bubble sort logic')).message, /Saved “sort.c”/);
+  const opened = await ask('can you open that in vscode');
+  assert.match(opened.message, /Sent “sort.c” to VS Code/);
+  assert.equal(opened.files[0].name, 'sort.c');
+  assert.equal(await app.call('assistant-file', 0, 'vscode'), '');
+  const sortUrl = 'vscode://file' + pathToFileURL(file.path).pathname;
+  assert.deepEqual(launches, [sortUrl, 'vscode://file' + pathToFileURL(otherFile).pathname, sortUrl, sortUrl]);
+  assert.match(launches[1], /\/main%20%231\.c$/);
+  rejectLaunch = true;
+  assert.match((await ask('open sort.c in vscode')).message, /couldn’t send this file to VS Code/);
+  assert.equal(fetch.mock.callCount(), 1);
+});
 
 test('preferences and drag position persist through restart, with native position lock', async () => {
   const app = await start({pets:{cat:fresh(Date.now(),'cat','Mochi')},active:'cat'});
