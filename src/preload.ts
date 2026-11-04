@@ -3,6 +3,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('anino', {
   onAssistantDraft: (callback: (text: string) => void) => ipcRenderer.on('assistant-draft', (_event, text) => callback(text)),
   askPet: (turns: unknown, scope: string) => ipcRenderer.invoke('ask-pet', turns, scope),
+  aiSettings: () => ipcRenderer.invoke('ai-settings'),
+  saveAiSettings: (input: unknown, remove: boolean) => ipcRenderer.invoke('save-ai-settings', input, remove),
+  testAiSettings: (input: unknown) => ipcRenderer.invoke('test-ai-settings', input),
+  approveProjectEdit: (id: string, apply: boolean) => ipcRenderer.invoke('approve-project-edit', id, apply),
   assistantFile: (index: number, action: string) => ipcRenderer.invoke('assistant-file', index, action),
   setupNotifications: () => ipcRenderer.invoke('setup-notifications'),
   onAlert: (callback: (alert: { source: string; message: string; count: number }) => void) =>

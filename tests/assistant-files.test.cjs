@@ -77,7 +77,10 @@ test('creating a named empty file in Downloads does not require Ollama', async t
 test('requested source contents still go to Qwen and retain the Downloads destination', async t => {
   const content = 'int index_sort(void) { return 0; }\n';
   const fetch = t.mock.method(globalThis, 'fetch', async () => toolReply('Downloads\\indexsort.c', content));
-  const intent = await ask('Create indexsort.c in Downloads with a C function that sorts an array of indices by their values.');
-  assert.deepEqual(intent, { type: 'create-file', file: { name: 'indexsort.c', content }, destination: 'downloads' });
+  const intent = await ask('Okay, now can you create indexsort.c in Downloads with a C function that sorts an array of indices by their values, then open it in VS Code?');
+  assert.deepEqual(intent, { type: 'create-file', file: { name: 'indexsort.c', content }, destination: 'downloads', openInVSCode: true });
   assert.equal(fetch.mock.callCount(), 1);
+  const request = JSON.parse(fetch.mock.calls[0].arguments[1].body);
+  assert.doesNotMatch(request.messages.at(-1).content, /Downloads|VS Code/);
+  assert.match(request.messages.at(-1).content, /sorts an array of indices by their values/);
 });

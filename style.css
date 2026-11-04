@@ -206,8 +206,12 @@ input { min-width: 0; flex: 1; border: 1px solid #9d89a8; border-radius: 5px; ba
 #toy-ball { right: calc(15px + 58px * var(--pet-scale) + var(--toy-right, 0px)); bottom: calc(5px + 19px * var(--pet-scale) + var(--toy-bottom, 0px)); }
 #toy-hint { right: calc(15px + 101px * var(--pet-scale) + var(--toy-right, 0px)); bottom: calc(5px + 42px * var(--pet-scale) + var(--toy-bottom, 0px)); }
 #preferences { display: grid; gap: 10px; }
-#preferences fieldset { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 9px; border: 1px solid #cbb9cc; border-radius: 7px; }
-#preferences legend { font-weight: 700; }
+#preferences fieldset, #ai-settings fieldset { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 9px; border: 1px solid #cbb9cc; border-radius: 7px; }
+#preferences legend, #ai-settings legend { font-weight: 700; }
+#ai-settings { margin-bottom: 12px; }
+#ai-settings input:not([type="checkbox"]), #ai-settings select { width: 100%; min-width: 0; }
+#ai-settings .check { display: flex; align-items: center; gap: 6px; }
+#ai-result:empty { display: none; }
 #preferences label { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 #preferences .check { justify-content: flex-start; font-size: 12px; }
 #preferences input[type="checkbox"] { flex: none; margin: 0; accent-color: #745096; }
@@ -307,6 +311,14 @@ select { max-width: 145px; background: #fffcf7; border: 1px solid #9d89a8; borde
 #ask-files { list-style: none; margin: 6px 0 0; padding: 0; }
 #ask-files li { border: 1px solid #cbb9cc; border-radius: 5px; padding: 6px; margin-bottom: 5px; overflow-wrap: anywhere; }
 #ask-files p { margin: 4px 0; font-size: 11px; color: var(--muted); }
+#ask-proposal:not(:empty) { margin-top: 7px; display: grid; gap: 6px; padding: 7px; border: 1px solid #a4b69a; border-radius: 5px; background: #edf3df; overflow-wrap: anywhere; }
+#ask-proposal p { font-size: 11px; color: var(--muted); }
+#ask-proposal pre { max-height: 155px; overflow: auto; margin: 5px 0; padding: 8px; border-radius: 5px; border: 1px solid #303038; background: #000; color: #e6edf3; font: 12px/1.55 Consolas, monospace; tab-size: 4; user-select: text; }
+#ask-proposal .preview-comment { color: #9aaca5; }
+#ask-proposal .preview-string { color: #a7d98b; }
+#ask-proposal .preview-number { color: #ffd282; }
+#ask-proposal .preview-keyword { color: #cbb3ff; }
+#ask-proposal .preview-directive, #ask-proposal .preview-tag { color: #83d5ff; }
 @media (max-height: 490px) {
   #panel:has(#pet-home:not([hidden]) #page-ask:not([hidden])) .brand { display: none; }
   #pet-home:has(#page-ask:not([hidden])) .page-nav { padding-block: 6px; }

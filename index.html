@@ -67,10 +67,11 @@
       <p id="message" aria-live="polite">Something tiny has moved in.</p>
     </section>
     <section id="page-ask" aria-label="Ask Pet" hidden>
-      <div class="ask-heading"><h2>Ask Pet</h2><span class="ask-local">LOCAL · QWEN3</span></div>
+      <div class="ask-heading"><h2>Ask Pet</h2><span id="ask-engine" class="ask-local">LOCAL · QWEN3</span></div>
       <div id="ask-stream" tabindex="0" aria-label="Conversation and file results">
         <p id="ask-empty">Chat, create or find files, and manage Windows apps.</p>
         <div id="ask-chat" role="log" aria-label="Conversation" aria-live="polite"></div>
+        <div id="ask-proposal"></div>
         <ul id="ask-files" aria-label="File results"></ul>
       </div>
       <form id="ask-form">
@@ -115,6 +116,19 @@
       <p id="todo-result" role="status"></p>
     </section>
     <section id="page-settings" aria-label="Preferences" hidden>
+      <form id="ai-settings">
+        <fieldset>
+          <legend>Ask Pet AI</legend>
+          <label class="check"><input type="checkbox" id="ai-enabled">Use hybrid AI</label>
+          <label for="ai-provider">Cloud provider</label>
+          <select id="ai-provider"><option value="gemini">Gemini</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>
+          <label for="ai-model">Model ID</label><input id="ai-model" maxlength="120" required autocomplete="off">
+          <label for="ai-key">API key</label><input type="password" id="ai-key" maxlength="512" autocomplete="new-password" spellcheck="false">
+          <p class="settings-help">Hybrid sends the current chat or generation prompt to your provider. Local tools stay on this PC. Ask Pet falls back to Qwen when the provider fails.</p>
+          <div class="settings-row"><button type="submit">Save AI settings</button><button type="button" id="ai-test">Test connection</button><button type="button" id="ai-remove" hidden>Remove key</button></div>
+          <p id="ai-result" role="status"></p>
+        </fieldset>
+      </form>
       <form id="preferences">
         <fieldset><legend>Movement and appearance</legend>
           <label class="check"><input type="checkbox" name="locked">Lock pet position</label>

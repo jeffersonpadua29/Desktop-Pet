@@ -27,6 +27,10 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "electron": "^45.2.1",
+    "read-excel-file": "9.3.10",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "write-excel-file": "4.1.1"
   }
 }

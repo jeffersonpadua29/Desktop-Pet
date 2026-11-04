@@ -43,6 +43,14 @@ npm run setup:ai
 
 Choose a pet and open **Ask**. Qwen handles chat and tool requests locally. Created files go to **Documents → Pet Pocket** by default. Specify **Downloads** in your request to save there. A request to create a named source file without describing its contents makes an empty file immediately. File search uses the selected Windows folders, and you can open a result in Explorer or the desktop version of VS Code. Chat history stays in the running app session.
 
+### Optional cloud provider
+
+Open **Settings → Ask Pet AI**, select Gemini, OpenAI, or Anthropic, and enter your API key. The model ID defaults to one for that provider and can be edited. Use **Test connection**, then turn on **Use hybrid AI** and select **Save AI settings**. The key is encrypted for your Windows account and can be removed from the same panel.
+
+Hybrid mode sends the current chat or generation prompt to the selected provider. Pet Pocket keeps its file searches and desktop actions local. If the provider rejects the request, times out, or returns an unusable response, Ask Pet retries with local Qwen. The Ask badge shows when it falls back. Turn off hybrid AI to use Qwen directly.
+
+Ask Pet can create Excel workbooks from a prompt. To edit a file Ask Pet just created, found, or opened, ask it what to change in that file. You can also name a file and its folder. For a project edit, give the relative filename and select the project folder when prompted. Edits support one UTF-8 text or source file up to 8 KB. Hybrid mode asks before sending file contents to a provider. Review the proposed contents, then click **Apply to file** or say **apply the edit** to update the original file. If you request tests, approval also runs the project's `npm test` script. You can request an Excel test report in the same prompt.
+
 ## Live notifications from a clone
 
 The repository includes an x64 development bundle at `setup/PetPocket-Notifications-x64.zip`. Keep that ZIP, `setup/notification-bundle.json`, and `setup/Install-Notifications.ps1` together when you push to GitHub. The ZIP includes the signed companion, its public certificate, and its Microsoft runtime dependencies.

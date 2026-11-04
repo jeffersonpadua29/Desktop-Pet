@@ -33,7 +33,7 @@ async function start(saved, weatherOverrides = {}, overrides = {}) {
   }
   const location = {name:'Test City',latitude:1,longitude:2,source:'city'};
   const electron = {
-    app: {setName:()=>{},requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),getPath:name=>'/virtual/'+name,on:(name,fn)=>{events[name]=fn;},quit:()=>{}},
+    app: {setName:()=>{},requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),getPath:name=>overrides.paths?.[name] ?? '/virtual/'+name,on:(name,fn)=>{events[name]=fn;},quit:()=>{}},
     BrowserWindow:Window, ipcMain:{handle:(name,fn)=>{ipc[name]=fn;},on:(name,fn)=>{ipc[name]=fn;}},
     screen:{getCursorScreenPoint:()=>({x:1000,y:700}),getDisplayNearestPoint:()=>({workArea:area}),getDisplayMatching:()=>({workArea:area})},
     Tray:class {setToolTip(){} on(){} setContextMenu(value){menu=value;}},
@@ -50,7 +50,7 @@ async function start(saved, weatherOverrides = {}, overrides = {}) {
     require:name=>overrides.modules?.[name]
       ? { ...mocks[name], ...overrides.modules[name] }
       : mocks[name] || require(name.startsWith('.') ? path.join(__dirname,'../dist',name) : name),
-    exports:{},__dirname:path.join(__dirname,'../dist'),process:{arch:'x64'},console,
+    exports:{},__dirname:path.join(__dirname,'../dist'),process:{arch:'x64'},console,Buffer,
     setInterval:fn=>{intervals.push(fn);return {fn};},clearInterval:()=>{},
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../dist/main.js'),'utf8'),context);
@@ -60,11 +60,200 @@ async function start(saved, weatherOverrides = {}, overrides = {}) {
     desktopAlert:input=>{windowsAlert=input;intervals.find(fn=>fn.name==='pollWindowsAlerts')();}};
 }
 
+test('Settings encrypts the selected provider key and cloud failure falls back in Ask', async t => {
+  const saved = { pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' };
+  let settings = '';
+  let encrypted = '';
+  let attempted = 0;
+  const key = 'private-fixture-api-key';
+  const app = await start(saved, {}, {
+    modules: {
+      electron: { safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: value => { encrypted = value; return Buffer.from('ciphertext'); },
+        decryptString: value => { assert.equal(value.toString(), 'ciphertext'); return encrypted; },
+      } },
+      'node:fs': {
+        readFileSync: name => name.endsWith('ai-settings.json') ? settings : JSON.stringify(saved),
+        writeFileSync: (name, value) => { if (name.endsWith('ai-settings.json.tmp')) settings = value; },
+        renameSync: () => {},
+      },
+    },
+  });
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.startsWith('https://api.openai.com/')) {
+      attempted++;
+      assert.equal(options.headers.Authorization, 'Bearer ' + key);
+      return new Response('', { status: 401 });
+    }
+    assert.equal(url, 'http://127.0.0.1:11434/api/chat');
+    return Response.json({ message: { content: 'Local fallback answer.' } });
+  });
+  const input = { enabled: true, provider: 'openai', model: 'gpt-4.1-mini', key };
+  assert.equal(app.call('ai-settings').enabled, false);
+  assert.equal(app.call('save-ai-settings', input).hasKey, true);
+  assert.doesNotMatch(settings, new RegExp(key));
+  assert.equal(app.call('ai-settings').secret, undefined);
+  const reply = await app.call('ask-pet', [{ role: 'user', content: 'Explain arrays' }], 'all');
+  assert.equal(reply.message, 'Local fallback answer.');
+  assert.equal(reply.run.engine, 'qwen');
+  assert.equal(reply.run.fallback, 'openai');
+  const removed = app.call('save-ai-settings', { ...input, key: '' }, true);
+  assert.equal(removed.hasKey, false);
+  assert.equal(removed.enabled, false);
+  await app.call('ask-pet', [{ role: 'user', content: 'Explain arrays' }], 'all');
+  assert.equal(attempted, 1);
+});
+
+test('Ask Pet uses cloud code to edit the last created file on disk after approval', async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-edit-'));
+  const filename = path.join(folder, 'sort.c');
+  t.after(() => {
+    if (fs.existsSync(filename)) fs.unlinkSync(filename);
+    fs.rmdirSync(folder);
+  });
+  const oldCode = 'int count(void) { return 1; }\n';
+  const newCode = 'int count(void) { return 2; }\n';
+  const home = { pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' };
+  let approvedCloudShare = false;
+  const app = await start(home, {}, {
+    paths: { downloads: folder },
+    modules: {
+      electron: {
+        safeStorage: { isEncryptionAvailable: () => true, decryptString: () => 'fixture-key' },
+        dialog: {
+          showOpenDialog: () => assert.fail('A known file does not need a folder picker.'),
+          showMessageBox: async (_window, options) => {
+            assert.match(options.detail, /sort\.c/);
+            approvedCloudShare = true;
+            return { response: 1 };
+          },
+        },
+      },
+      'node:fs': {
+        readFileSync: name => JSON.stringify(name.endsWith('ai-settings.json')
+          ? { enabled: true, provider: 'openai', model: 'gpt-4.1-mini', secret: 'Y2lwaGVydGV4dA==' }
+          : home),
+      },
+    },
+  });
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.match(url, /^https:\/\/api\.openai\.com/);
+    const body = JSON.parse(options.body);
+    const name = body.tools[0].function.name;
+    let args = { name: 'sort.c', content: oldCode };
+    if (name === 'propose_source') {
+      assert.equal(approvedCloudShare, true);
+      const request = JSON.parse(body.messages.at(-1).content);
+      assert.equal(request.filename, 'sort.c');
+      assert.equal(request.source, oldCode);
+      args = { content: newCode };
+    }
+    return Response.json({ choices: [{ message: { tool_calls: [{ function: { name, arguments: JSON.stringify(args) } }] } }] });
+  });
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  assert.match((await ask('Create sort.c in Downloads with a function that returns 1')).message, /Saved/);
+  const preview = await ask('Change the contents of that file so the function returns 2');
+  assert.equal(preview.run.engine, 'openai');
+  assert.equal(preview.proposal.before, oldCode);
+  assert.equal(preview.proposal.after, newCode);
+  assert.equal(fs.readFileSync(filename, 'utf8'), oldCode);
+  const result = await ask('apply the edit');
+  assert.match(result.message, /Updated “sort.c” on disk/);
+  assert.equal(result.files[0].name, 'sort.c');
+  assert.equal(fs.readFileSync(filename, 'utf8'), newCode);
+});
+
+test('Ask Pet renames a file across turns in either order and preserves occupied names', { skip: process.platform !== 'win32' }, async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-rename-'));
+  const sample = path.join(folder, 'sample.c');
+  const second = path.join(folder, 'sampleTwo.c');
+  const third = path.join(folder, 'sampleThree.c');
+  const occupied = path.join(folder, 'occupied.c');
+  t.after(() => {
+    for (const file of [sample, second, third, occupied]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    fs.rmdirSync(folder);
+  });
+  fs.writeFileSync(sample, 'int original;');
+  fs.writeFileSync(occupied, 'int occupied;');
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { downloads: folder },
+    modules: { 'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync } },
+  });
+  const fetch = t.mock.method(globalThis, 'fetch', async () => assert.fail('Renaming should stay local.'));
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  assert.match((await ask('i said rename the file into sampleTwo.c')).message, /current filename/);
+  assert.match((await ask('sample.c in download folder')).message, /Renamed “sample.c” to “sampleTwo.c”/);
+  assert.equal(fs.existsSync(sample), false);
+  assert.equal(fs.readFileSync(second, 'utf8'), 'int original;');
+  assert.match((await ask('sampleTwo.c in download folder')).message, /Found “sampleTwo.c”/);
+  assert.match((await ask('rename into occupied.c')).message, /already exists/);
+  assert.equal(fs.readFileSync(occupied, 'utf8'), 'int occupied;');
+  assert.equal(fs.readFileSync(second, 'utf8'), 'int original;');
+  const renamed = await ask('rename into sampleThree.c');
+  assert.equal(renamed.files[0].name, 'sampleThree.c');
+  assert.equal(fs.existsSync(second), false);
+  assert.equal(fs.readFileSync(third, 'utf8'), 'int original;');
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('Ask Pet controls only Spotify and reports the verified playback result', async t => {
+  const playback = [];
+  const opened = [];
+  let status = 'playing';
+  let selection = 'no-match';
+  let verification = 'playing';
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    modules: {
+      electron: { shell: { openExternal: async url => opened.push(url) } },
+      'node:child_process': { execFile: (_exe, args, _options, callback) => {
+        const encoded = args.indexOf('-EncodedQuery');
+        const query = encoded < 0 ? null : Buffer.from(args[encoded + 1], 'base64').toString();
+        const file = args[args.indexOf('-File') + 1];
+        if (/spotify-search-play\.ps1$/.test(file)) {
+          playback.push(['select', query]);
+          return callback(null, selection + '\n');
+        }
+        assert.match(file, /media\.ps1$/);
+        const action = args[args.indexOf('-Action') + 1];
+        playback.push([action, query]);
+        callback(null, (action === 'verify' ? verification : status) + '\n');
+      } },
+    },
+  });
+  const fetch = t.mock.method(globalThis, 'fetch', async () => assert.fail('Media controls are local.'));
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  assert.equal((await ask('Play Spotify')).message, 'Spotify is playing.');
+  status = 'paused';
+  assert.equal((await ask('Stop Spotify')).message, 'Spotify is paused.');
+  assert.equal((await ask('Press Space in Spotify')).message, 'Spotify is paused.');
+  status = 'different-track';
+  assert.match((await ask('search for amatz')).message, /Searching Spotify/);
+  selection = JSON.stringify({ title: 'Amatz', artist: '' });
+  assert.equal((await ask('now play')).message, 'Spotify is playing “Amatz”.');
+  selection = JSON.stringify({ title: 'Bohemian Rhapsody', artist: 'Queen' });
+  assert.equal((await ask('search for bohemian and play')).message, 'Spotify is playing “Bohemian Rhapsody” by Queen.');
+  selection = 'no-match';
+  assert.match((await ask('Play MATIKAS on Spotify')).message, /couldn’t find a playable result/);
+  selection = JSON.stringify({ title: 'MATIKAS', artist: '' });
+  verification = 'unconfirmed';
+  assert.match((await ask('Play it')).message, /couldn’t confirm/);
+  assert.deepEqual(playback, [
+    ['play', null], ['pause', null], ['toggle', null], ['play', 'amatz'], ['select', 'amatz'], ['verify', 'Amatz'],
+    ['play', 'bohemian'], ['select', 'bohemian'], ['verify', 'Bohemian Rhapsody by Queen'],
+    ['play', 'MATIKAS'], ['select', 'MATIKAS'], ['play', 'MATIKAS'], ['select', 'MATIKAS'], ['verify', 'MATIKAS'],
+  ]);
+  assert.deepEqual(opened, ['spotify:search:amatz', 'spotify:search:bohemian', 'spotify:search:MATIKAS']);
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test('Ask Pet opens its last generated file in VS Code and keeps the file card available', async t => {
   const assistant = require('../dist/assistant');
   const documents = path.join(path.sep, 'virtual', 'documents');
   const folder = path.join(documents, 'Pet Pocket');
   const file = { name: 'sort.c', folder, path: path.join(folder, 'sort.c'), modified: 1, canOpen: false };
+  const downloads = path.join(path.sep, 'virtual', 'downloads');
+  const downloadFile = path.join(downloads, 'indexsort.c');
   const otherName = 'main #1.c';
   const otherFile = path.join(documents, otherName);
   const launches = [];
@@ -77,6 +266,10 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
     modules: {
       './assistant': {
         ...assistant,
+        findFiles: async roots => {
+          assert.deepEqual(Array.from(roots), ['/virtual/downloads']);
+          return { files: [{ ...file, name: 'indexsort.c', path: downloadFile, folder: downloads }], limited: false };
+        },
         saveGeneratedFile: async (destination, requested) => {
           saves.push([destination, requested.name, requested.content]);
           return { ...file, name: requested.name, folder: destination, path: path.join(destination, requested.name) };
@@ -85,7 +278,7 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
       'node:fs': {
         existsSync: target => [documents, folder, file.path].includes(path.normalize(target)),
         readdirSync: target => [{ name: path.normalize(target) === documents ? otherName : file.name, isFile: () => true }],
-        statSync: target => [file.path, otherFile].includes(target) ? { isFile: () => true } : undefined,
+        statSync: target => [file.path, otherFile, downloadFile].includes(target) ? { isFile: () => true } : undefined,
       },
       electron: {
         shell: { openExternal: async url => {
@@ -108,11 +301,14 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
   assert.match(launches[1], /\/main%20%231\.c$/);
   rejectLaunch = true;
   assert.match((await ask('open sort.c in vscode')).message, /couldn’t send this file to VS Code/);
-  const downloaded = await ask('can you create a indexsort.c in my download folder');
-  assert.equal(downloaded.message, 'Created an empty file named “indexsort.c” in Downloads.');
+  rejectLaunch = false;
+  const downloaded = await ask('Can you create indexsort.c in my download folder, then open it in VS Code?');
+  assert.equal(downloaded.message, 'Created an empty file named “indexsort.c” in Downloads. Sent it to VS Code.');
+  assert.equal(launches.at(-1), 'vscode://file' + pathToFileURL(downloadFile).pathname);
+  assert.equal((await ask('Paki hanapin ang indexsort.c sa Downloads.')).files[0].name, 'indexsort.c');
   assert.deepEqual(saves.map(([destination, name, content]) => [path.normalize(destination), name, content]), [
     [folder, 'sort.c', 'int x;'],
-    [path.join(path.sep, 'virtual', 'downloads'), 'indexsort.c', ''],
+    [downloads, 'indexsort.c', ''],
   ]);
   assert.equal(fetch.mock.callCount(), 1);
 });

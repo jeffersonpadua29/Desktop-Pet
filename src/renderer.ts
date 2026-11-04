@@ -12,11 +12,18 @@ type Companion = ReturnType<typeof import('./pet').companionDetails>;
 type HomeSnapshot = { pet: Snapshot | null; playing: boolean; names: Partial<Record<Species, string>>; preferences: Preferences; quietHoursActive: boolean; weather: WeatherState; routines: Routine[]; routine: RoutineState; companion: Companion | null; todos: import('./todos').Todo[] };
 type AskTurn = { role: 'user' | 'assistant'; content: string };
 type AskFile = { name: string; folder: string; modified: number; canOpen: boolean };
-type AskReply = { message: string; mood?: string; files?: AskFile[] };
+type AiSettingsView = import('./cloud-ai').AiSettingsView;
+type CloudProvider = import('./cloud-ai').CloudProvider;
+type EditPreview = { id: string; path: string; before: string; after: string; test: boolean };
+type AskReply = { message: string; mood?: string; files?: AskFile[]; proposal?: EditPreview; run?: import('./cloud-ai').AiRun };
 
 const api = (window as Window & { anino?: {
   onAssistantDraft: (callback: (text: string) => void) => void;
   askPet: (turns: AskTurn[], scope: string) => Promise<AskReply>;
+  aiSettings: () => Promise<AiSettingsView>;
+  saveAiSettings: (input: unknown, remove: boolean) => Promise<AiSettingsView>;
+  testAiSettings: (input: unknown) => Promise<string>;
+  approveProjectEdit: (id: string, apply: boolean) => Promise<AskReply>;
   assistantFile: (index: number, action: string) => Promise<string>;
   setupNotifications: () => Promise<boolean>;
   onAlert: (callback: (alert: { source: string; message: string; count: number; silent: boolean; kind?: 'desktop' | 'weather' | 'reminder' }) => void) => void;
@@ -953,6 +960,65 @@ document.querySelector('#setup-notifications')!.addEventListener('click', async 
 });
 
 const askForm = document.querySelector<HTMLFormElement>('#ask-form')!;
+const askEngine = document.querySelector<HTMLElement>('#ask-engine')!;
+const aiForm = document.querySelector<HTMLFormElement>('#ai-settings')!;
+const aiEnabled = document.querySelector<HTMLInputElement>('#ai-enabled')!;
+const aiProvider = document.querySelector<HTMLSelectElement>('#ai-provider')!;
+const aiModel = document.querySelector<HTMLInputElement>('#ai-model')!;
+const aiKey = document.querySelector<HTMLInputElement>('#ai-key')!;
+const aiResult = document.querySelector<HTMLElement>('#ai-result')!;
+const aiRemove = document.querySelector<HTMLButtonElement>('#ai-remove')!;
+const providerNames = { gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic' };
+let aiSettings: AiSettingsView | undefined;
+
+function showAiSettings(settings: AiSettingsView) {
+  aiSettings = settings;
+  aiEnabled.checked = settings.enabled;
+  aiProvider.value = settings.provider;
+  aiModel.value = settings.model;
+  aiKey.value = '';
+  aiKey.placeholder = settings.hasKey ? 'Key saved on this PC' : 'Enter your provider key';
+  aiRemove.hidden = !settings.hasKey;
+  askEngine.textContent = settings.enabled ? 'HYBRID · ' + providerNames[settings.provider] : 'LOCAL · QWEN3';
+}
+
+function aiFormValues() {
+  return { enabled: aiEnabled.checked, provider: aiProvider.value, model: aiModel.value.trim(), key: aiKey.value };
+}
+
+async function updateAiSettings(action: 'save' | 'test' | 'remove') {
+  if (!aiForm.reportValidity()) return;
+  const values = aiFormValues();
+  const controls = [...aiForm.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>('input, button, select')];
+  controls.forEach(control => { control.disabled = true; });
+  aiResult.textContent = action === 'test' ? 'Testing provider…' : 'Saving…';
+  try {
+    if (action === 'test') aiResult.textContent = await api.testAiSettings(values);
+    else {
+      const settings = await api.saveAiSettings(values, action === 'remove');
+      showAiSettings(settings);
+      aiResult.textContent = action === 'remove' ? 'Key removed. Using local Qwen.' :
+        values.enabled && !settings.hasKey ? 'Enter a key to enable hybrid AI. Using local Qwen.' : 'AI settings saved.';
+    }
+  } catch {
+    aiResult.textContent = 'Could not save AI settings. Check the model ID and Windows credential storage.';
+  } finally {
+    controls.forEach(control => { control.disabled = false; });
+  }
+}
+
+void api.aiSettings().then(showAiSettings).catch(() => { aiResult.textContent = 'Could not load AI settings.'; });
+aiProvider.addEventListener('change', () => {
+  const provider = aiProvider.value as CloudProvider;
+  aiModel.value = (provider === aiSettings?.provider ? aiSettings.model : aiSettings?.defaults[provider]) ?? '';
+  aiKey.value = '';
+  const saved = provider === aiSettings?.provider && aiSettings.hasKey;
+  aiKey.placeholder = saved ? 'Key saved on this PC' : 'Enter your provider key';
+  aiRemove.hidden = !saved;
+});
+aiForm.addEventListener('submit', event => { event.preventDefault(); void updateAiSettings('save'); });
+document.querySelector('#ai-test')!.addEventListener('click', () => { void updateAiSettings('test'); });
+aiRemove.addEventListener('click', () => { void updateAiSettings('remove'); });
 const askInput = document.querySelector<HTMLInputElement>('#ask-input')!;
 const askSend = document.querySelector<HTMLButtonElement>('#ask-send')!;
 const askScope = document.querySelector<HTMLSelectElement>('#ask-scope')!;
@@ -960,6 +1026,7 @@ const askChat = document.querySelector<HTMLElement>('#ask-chat')!;
 const askStream = document.querySelector<HTMLElement>('#ask-stream')!;
 const askEmpty = document.querySelector<HTMLElement>('#ask-empty')!;
 const askFiles = document.querySelector<HTMLElement>('#ask-files')!;
+const askProposal = document.querySelector<HTMLElement>('#ask-proposal')!;
 const askStatus = document.querySelector<HTMLElement>('#ask-status')!;
 const askDraft = document.createElement('p');
 askDraft.dataset.role = 'assistant';
@@ -1015,21 +1082,108 @@ function showAskFiles(files: AskFile[]) {
   if (files.length) askFiles.firstElementChild?.scrollIntoView({ block: 'nearest' });
 }
 
+const previewKeywords = new Set(('alignas async await bool boolean break case catch char class const continue def default do double else enum export extern false finally float fn for from function go if import in int interface let long match namespace new nil none null package pass private public raise return short signed static string struct switch throw true try type typedef uint union unsigned using var void while yield').split(' '));
+
+function highlightPreview(code: HTMLElement, text: string, path: string) {
+  const extension = path.split('.').at(-1)?.toLowerCase() ?? '';
+  if (/^(?:txt|md|csv)$/.test(extension)) { code.textContent = text; return; }
+  const hash = extension === 'py' ? /#[^\r\n]*/ : /^(?:[ \t]*)#[^\r\n]*/;
+  const tokens = [
+    /(?<comment>\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|<!--[\s\S]*?-->)/,
+    /(?<string>"(?:\\[\s\S]|[^"\\\r\n])*"|'(?:\\[\s\S]|[^'\\\r\n])*'|\x60(?:\\[\s\S]|[^\x60\\])*\x60)/,
+    /(?<number>\b(?:0[xX][\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b)/,
+    /(?<word>\b[A-Za-z_]\w*\b)/,
+  ].map(token => token.source);
+  if (/^(?:c|h|cpp|cs|py)$/.test(extension)) tokens.unshift('(?<directive>' + hash.source + ')');
+  if (extension === 'html') tokens.unshift(/(?<tag><\/?[a-z][\w-]*)/i.source);
+  const pattern = new RegExp(tokens.join('|'), 'gm');
+  const fragment = document.createDocumentFragment();
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index;
+    const token = match[0];
+    const group = Object.keys(match.groups ?? {}).find(name => match.groups?.[name] !== undefined);
+    const color = group === 'word' ? (previewKeywords.has(token.toLowerCase()) ? 'keyword' : undefined) :
+      group === 'directive' && extension === 'py' ? 'comment' : group;
+    if (!color) continue;
+    fragment.append(text.slice(cursor, index));
+    const span = document.createElement('span');
+    span.className = 'preview-' + color;
+    span.textContent = token;
+    fragment.append(span);
+    cursor = index + token.length;
+  }
+  fragment.append(text.slice(cursor));
+  code.replaceChildren(fragment);
+}
+
+function showProjectPreview(preview: EditPreview) {
+  const heading = document.createElement('strong');
+  heading.textContent = 'Review file changes';
+  const path = document.createElement('p');
+  path.textContent = preview.path;
+  const source = (label: string, text: string, expanded: boolean) => {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    summary.textContent = label;
+    highlightPreview(code, text, preview.path);
+    pre.append(code);
+    details.open = expanded;
+    details.append(summary, pre);
+    return details;
+  };
+  const actions = document.createElement('div');
+  actions.className = 'settings-row';
+  for (const [apply, label] of [[true, preview.test ? 'Apply & run npm test' : 'Apply to file'], [false, 'Discard']] as const) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', async () => {
+      if (askSend.disabled) return;
+      askSend.disabled = true;
+      askProposal.replaceChildren();
+      askStatus.textContent = apply ? 'Applying approved edit…' : '';
+      try {
+        const result = await api.approveProjectEdit(preview.id, apply);
+        addAskTurn('assistant', result.message);
+        if (result.files) showAskFiles(result.files);
+        askStatus.textContent = '';
+      } catch {
+        askStatus.textContent = 'The project action did not finish.';
+      } finally { askSend.disabled = false; }
+    });
+    actions.append(button);
+  }
+  askProposal.replaceChildren(heading, path, source('Current contents', preview.before, false),
+    source('Proposed contents', preview.after, true), actions);
+  askProposal.scrollIntoView({ block: 'nearest' });
+}
+
 askForm.addEventListener('submit', async event => {
   event.preventDefault();
   const question = askInput.value.trim();
   if (!question || askSend.disabled) return;
   askSend.disabled = true;
   askFiles.replaceChildren();
+  askProposal.replaceChildren();
   askInput.value = '';
   addAskTurn('user', question);
   askStatus.textContent = 'Thinking on this PC…';
   try {
     const reply = await api.askPet(askTurns, askScope.value);
+    if (reply.run) {
+      const { engine, fallback } = reply.run;
+      askEngine.textContent = fallback ? providerNames[fallback] + ' → Qwen' :
+        engine === 'qwen' ? 'LOCAL · QWEN3' : engine === 'windows' ? 'LOCAL TOOL' : providerNames[engine];
+      askEngine.title = fallback ? 'Cloud provider unavailable. Retried this request with local Qwen.' : '';
+    }
     askDraft.remove();
     askStatus.textContent = '';
     addAskTurn('assistant', reply.message);
     if (reply.files) showAskFiles(reply.files);
+    if (reply.proposal) showProjectPreview(reply.proposal);
     if (reply.mood) {
       reactionUntil = Date.now() + 1300;
       petButton.dataset.mood = reply.mood;

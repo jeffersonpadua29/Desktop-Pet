@@ -1,24 +1,28 @@
 import { mkdir, open, opendir, stat, unlink } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
+import { chatCloud, type AiRun, type CloudConfig, type ModelMessage, type ModelTool } from './cloud-ai';
+import { projectEdit, type FileScope, type ProjectEdit } from './project-ai';
+import { isWindowsFilename } from './file-rename';
 
 export const model: string = require('../package.json').config.ollama_model;
 const localChat = 'http://127.0.0.1:11434/api/chat';
 
 export type Turn = { role: 'user' | 'assistant'; content: string };
 export type PetContext = { name: string; food: number; energy: number; bond: number; asleep: boolean };
-export type SpotifyContext = { query?: string };
+export type SpotifyContext = { query?: string; awaitingSelection?: true };
+export type SpotifyAction = 'play' | 'pause' | 'toggle';
 export type FileMatch = { name: string; folder: string; path: string; modified: number; canOpen: boolean };
-type Search = { name: string; extension: string; date: string };
+type Search = { name: string; extension: string; date: string; exact?: true; folder?: FileScope };
 
 const allowedExtensions = new Set([
   '.txt', '.md', '.pdf', '.docx', '.xlsx', '.pptx', '.csv', '.rtf',
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp3', '.wav', '.mp4',
 ]);
 const ignoredDirectories = new Set(['node_modules', '.git', 'dist', '$recycle.bin']);
-const fileFormats = ['txt', 'md', 'csv', 'json', 'html', 'css', 'js', 'ts', 'py', 'c', 'h'] as const;
+const fileFormats = ['txt', 'md', 'csv', 'json', 'html', 'css', 'js', 'ts', 'py', 'c', 'h', 'xlsx'] as const;
 const generatedExtension = new RegExp('\\.(?:' + fileFormats.join('|') + ')(?!\\w|\\.\\w)', 'i');
 type GeneratedFile = { name: string; content: string };
-const fileFormatList = 'TXT, Markdown, CSV, JSON, HTML, CSS, JavaScript, TypeScript, Python, and C';
+const fileFormatList = 'TXT, Markdown, CSV, Excel, JSON, HTML, CSS, JavaScript, TypeScript, Python, and C';
 
 const launchTargets = ['spotify', 'downloads', 'calculator', 'arduino', 'vscode'] as const;
 export type LaunchTarget = typeof launchTargets[number];
@@ -30,16 +34,18 @@ function isLaunchTarget(value: unknown): value is LaunchTarget {
 export type Intent =
   | { type: 'reply'; message: string }
   | { type: 'find'; search: Search }
-  | { type: 'create-file'; file: GeneratedFile; destination?: 'downloads' }
-  | { type: 'open-in-vscode'; name?: string; folder?: 'documents' }
+  | { type: 'create-file'; file: GeneratedFile; destination?: 'downloads'; openInVSCode?: true }
+  | { type: 'project-edit'; edit: ProjectEdit }
+  | { type: 'open-in-vscode'; name?: string; folder?: FileScope }
   | { type: 'launch'; target: LaunchTarget }
   | { type: 'window'; action: 'list' }
   | { type: 'window'; action: WindowAction; target: string }
   | { type: 'spotify-search'; query: string; play?: true }
+  | { type: 'spotify-playback'; action: SpotifyAction; query?: string; launch?: true }
   | { type: 'close'; target: 'spotify' }
   | { type: 'care'; action: 'feed' | 'pet' | 'wake' };
 
-const tools = [
+const tools: ModelTool[] = [
   {
     type: 'function',
     function: {
@@ -49,7 +55,7 @@ const tools = [
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Filename only, including one of these extensions: ' + fileFormats.join(', ') + '. Default to .txt for an unspecified format.' },
-          content: { type: 'string', description: 'Complete file contents. Use raw text, without a surrounding Markdown code fence.' },
+          content: { type: 'string', description: 'Complete raw file contents without Markdown fences. For .xlsx, use a JSON array of rows, each an array of strings, numbers, booleans, or null. Use the first row for headers.' },
         },
         required: ['name', 'content'],
       },
@@ -120,30 +126,102 @@ const tools = [
 function commandText(text: string) {
   return text.trim()
     .replace(/^(?:hi|hello|hey)[\s,.!]+/i, '')
-    .replace(/^(?:(?:ok(?:ay)?)[, ]+)?(?:(?:can|could|would|will) you\s+|(?:i need|i want) you to\s+)?(?:please\s+|pa-)?/i, '');
+    .replace(/^(?:(?:ok(?:ay)?|now|then|actually|instead|please|paki)[,\s]+|(?:can|could|would|will) you\s+|(?:i need|i want) you to\s+|i (?:said|meant)[,\s]+|pa-)+/i, '')
+    .replace(/^(?:buksan|i-open)\s+/i, 'open ')
+    .replace(/^(?:hanapin|i-search)\s+(?:ang\s+)?/i, 'find ')
+    .replace(/^(?:gawan mo ako ng|gumawa ka ng)\s+/i, 'create ');
+}
+
+function knownFileName(name: string) {
+  const extension = extname(name).toLowerCase();
+  return !/[<>:"/\\|?*\p{Cc}]/u.test(name) &&
+    (allowedExtensions.has(extension) || fileFormats.some(format => extension === '.' + format));
+}
+
+function extractFileLocation(subject: string) {
+  const location = /\s+(?:in|inside|under|from|sa)\s+(?:(?:my|the)\s+)?(downloads?|documents?|desktop)(?:\s+folder)?\.?$/i.exec(subject);
+  const folderName = location?.[1].toLowerCase();
+  const folder: FileScope | undefined = folderName === 'desktop' ? 'desktop' :
+    folderName?.startsWith('download') ? 'downloads' : folderName ? 'documents' : undefined;
+  return { target: (location ? subject.slice(0, location.index) : subject).trim(), folder };
+}
+
+export type NamedFile = { name: string; folder?: FileScope };
+
+function literalFilename(text: string) {
+  return text.trim().replace(/[.!?]+$/, '').replace(/^["“'`]|["”'`]$/g, '');
+}
+
+export function namedFileReference(text: string): NamedFile | undefined {
+  const { target, folder } = extractFileLocation(text.trim().replace(/[!?]+$/, ''));
+  const name = literalFilename(target);
+  if (isWindowsFilename(name) && /^\.[a-z0-9_-]{1,16}$/i.test(extname(name)) &&
+      (!/\s/.test(name) || /^["“'`]/.test(target))) {
+    return { name, folder };
+  }
+}
+
+export function renameRequest(text: string) {
+  const action = /^rename(?:\s+([\s\S]+))?[.!?]*$/i.exec(commandText(text));
+  if (!action) return;
+  const subject = action[1]?.trim() ?? '';
+  const separation = [...subject.matchAll(/"[^"]*"|“[^”]*”|`[^`]*`|'[^']*'|(?:^|\s+)(to|into|as)\s+/gi)].find(match => match[1]);
+  const sourceText = (separation ? subject.slice(0, separation.index) : subject).trim()
+    .replace(/^(?:the\s+)?file\s+(?:named\s+)?/i, '');
+  const source = namedFileReference(sourceText);
+  const invalidSource = Boolean(sourceText && !source && !/^(?:it|this|that|(?:(?:my|the|that|this|last)\s+)?(?:last\s+)?file)[.!?]*$/i.test(sourceText));
+  return { source, newName: separation ? literalFilename(subject.slice(separation.index + separation[0].length)) : undefined, invalidSource };
+}
+
+export function canOpenAssistantFile(name: string) {
+  return allowedExtensions.has(extname(name).toLowerCase());
+}
+
+function fileSearchRequest(command: string) {
+  const match = /^(find|search(?: for)?|locate|look for)\s+(.+)$/i.exec(command);
+  if (!match) return;
+  const { target: query, folder } = extractFileLocation(match[2].replace(/[!?]$/, '').trim());
+  const candidate = query.replace(/\.$/, '');
+  const name = candidate.replace(/^(?:(?:a|the)\s+)?file\s+(?:(?:named|called)\s+)?/i, '')
+    .replace(/^["“'`]|["”'`]$/g, '');
+  const exact = name.length <= 120 && knownFileName(name) && (!/\s/.test(name) || name !== candidate) ? name : undefined;
+  return { prompt: match[1] + ' ' + query, folder, exact };
 }
 
 function spotifyIntent(command: string, spotify?: SpotifyContext): Intent | undefined {
   if (/\b(?:unless|instead of|rather than)\b|\bnot\s+(?:on|in)\s+spotify\b|\b(?:and|but)\s+(?:not|never|do not|don['’]t)\b/i.test(command)) return;
   const compound = /^(?:open|launch|start)\s+(?:the\s+)?spotify\s+(?:and|then)\s+(.+)$/i.exec(command);
-  const withApp = /^(.+?)\s+(?:on|in)\s+spotify[.!?]*$/i.exec(command);
-  const request = compound?.[1] ?? withApp?.[1] ?? command;
-  if (spotify?.query && /^play\s+(?:it|that(?: song| track)?|the (?:song|track) you found)[.!?]*$/i.test(request)) {
-    return { type: 'reply', message: 'Select the track in the Spotify results for “' + spotify.query + '” to start playback.' };
-  }
+  const withApp = /^(.+?)\s+(?:on|in|sa)\s+spotify((?:,\s*|\s+)(?:and(?: then)?|then)\s+play(?: it)?)?[.!?]*$/i.exec(command);
+  const request = compound?.[1] ?? (withApp ? withApp[1] + (withApp[2] ? ' ' + withApp[2].replace(/^[,\s]+/, '') : '') : command);
   const explicit = Boolean(compound || withApp);
-  const match = explicit || spotify
-    ? /^(search(?: for)?|find|play)\s+(.+?)[.!?]*$/i.exec(request)
-    : null;
+  const transport = /^(play\/pause|play|resume|pause|stop|toggle(?: playback)?|press (?:the )?space(?:\s*bar)?(?: key)?)(?:\s+(.+?))?[.!?]*$/i.exec(request);
+  if (transport) {
+    const verb = transport[1].toLowerCase();
+    const target = (transport[2] ?? '').replace(/(?:^|\s+)(?:now|again|please)$/i, '');
+    const action: SpotifyAction = /^(?:play|resume)$/.test(verb) ? 'play' : /^(?:pause|stop)$/.test(verb) ? 'pause' : 'toggle';
+    const reference = /^(?:it|that(?: song| track)?|the (?:song|track) you found)$/i.test(target);
+    if (reference && spotify?.query && action === 'play') return { type: 'spotify-playback', action, query: spotify.query };
+    const app = /^(?:the\s+)?spotify(?:\s+(?:app|music|playback))?$/i.test(target);
+    const current = /^(?:(?:the|current)\s+)*(?:music|song|track|playback)$/i.test(target);
+    if (spotify?.awaitingSelection && spotify.query && verb === 'play' && !compound &&
+        (!target || /^(?:the\s+)?(?:song|track)$/i.test(target))) {
+      return { type: 'spotify-playback', action, query: spotify.query };
+    }
+    if (app || current || (verb === 'stop' && target.toLowerCase() === 'playing') || (reference && (explicit || spotify)) ||
+        (!target && (action !== 'toggle' || explicit || spotify))) {
+      return { type: 'spotify-playback', action, ...(compound ? { launch: true } : {}) };
+    }
+  }
+  const match = /^(search(?: for)?|find|play)\s+(.+?)[.!?]*$/i.exec(request);
   if (!match) return;
   const verb = match[1].toLowerCase();
   const tail = match[2];
-  const playSuffix = /\s+(?:and(?: then)?|then)\s+play(?: it)?$/i;
+  const playSuffix = /(?:,\s*|\s+)(?:and(?: then)?|then)\s+play(?: it)?$/i;
   const play = verb === 'play' || /^and play\s+/i.test(tail) || playSuffix.test(tail);
   if (!explicit) {
-    if (verb === 'find' && !play) return;
-    if (/^(?:(?:a|the|my)\s+)?(?:local\s+)?(?:file|folder|document)s?\b|\b(?:on|in)\s+(?:my\s+|the\s+)?(?:pc|computer|desktop|documents|downloads|youtube|the web|the internet)\b|\bonline\s*$/i.test(tail)) return;
-    if (allowedExtensions.has(extname(tail.replace(/^["“]|["”]$/g, '')).toLowerCase())) return;
+    if ((!spotify || verb === 'find') && !play) return;
+    if (/^(?:(?:a|the|my)\s+)?(?:local\s+)?(?:file|folder|document|video|game)s?\b|\b(?:on|in|sa)\s+(?:my\s+|the\s+)?(?:pc|computer|desktop|documents|downloads|youtube|the web|the internet)\b|\bonline\s*$/i.test(tail)) return;
+    if (knownFileName(tail.replace(playSuffix, '').replace(/^["“'`]|["”'`]$/g, ''))) return;
   }
   const query = tail.replace(/^and play\s+/i, '').replace(playSuffix, '')
     .replace(/^(?:the\s+)?(?:song|track|album|artist)\s+/i, '').trim().replace(/^["“']+|["”'!?]+$/g, '').slice(0, 160);
@@ -178,7 +256,8 @@ function requestedTool(command: string) {
 }
 
 const leadingFileLocation = /^(?:in|inside)\s+(?:my\s+|the\s+)?(documents?|downloads?)(?:\s+(?:files?\s+)?folder)?[,\s]+/i;
-const downloadsLocation = /\s+(?:in|inside|to)\s+(?:my\s+|the\s+)?downloads?(?:\s+folder)?(?=[.!?]*$|[,\s]+(?:with|containing)\b)/i;
+const downloadsLocation = /\s+(?:in|inside|to|sa)\s+(?:my\s+|the\s+)?downloads?(?:\s+folder)?(?=[.!?]*$|[,\s]+(?:with|containing)\b)/i;
+const openCreatedFile = /(?:,\s*|\s+)(?:and(?:\s+then)?|then)\s+open\s+(?:(?:it|that|the file)\s+)?(?:in|with|using|sa)\s+(?:vs\s*code|visual studio code)[.!?]*$/i;
 
 function fileRequest(request: string) {
   const action = /^(create|generate|make|write|save|export|draft|build|put)\s+([\s\S]+)/i.exec(request);
@@ -186,64 +265,79 @@ function fileRequest(request: string) {
   const subject = action[2];
   if (/^(?:the|a|an)?\s*(?:existing |original )?(?:file|document|spreadsheet)\s+(?:I (?:have|saved|found)|you found)\b/i.test(subject) ||
       /\b(?:without saving|(?:do not|don['’]t) (?:save|create))\b/i.test(subject)) return false;
-  return /\b(?:file|document|spreadsheet|script|markdown|csv|json|html|css|javascript|typescript|python|txt|pdf|docx|xlsx|pptx|c source)\b/i.test(subject) ||
+  return /\b(?:file|document|spreadsheet|workbook|excel|script|markdown|csv|json|html|css|javascript|typescript|python|txt|pdf|docx|xlsx|pptx|c source)\b/i.test(subject) ||
     generatedExtension.test(subject) || /\band (?:save|export) (?:it|that|this)\b/i.test(subject) ||
     (/^(?:save|export)$/i.test(action[1]) && /^(?:it|this|that|the (?:answer|draft|reply|text))\b/i.test(subject));
 }
 
 function isGeneratedFilename(name: unknown): name is string {
-  if (typeof name !== 'string' || !name || name.length > 100 ||
-      /^[ .]|[ .]$|[<>:"/\\|?*\p{Cc}\p{Cf}]/u.test(name) ||
-      /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]) *(?:\.|$)/i.test(name)) return false;
+  if (!isWindowsFilename(name) || name.length > 100) return false;
   const extension = extname(name).slice(1).toLowerCase();
   return fileFormats.some(format => format === extension);
+}
+
+type WorkbookCell = string | number | boolean | null;
+
+function workbookRows(content: string): WorkbookCell[][] | undefined {
+  try {
+    const rows: unknown = JSON.parse(content);
+    if (Array.isArray(rows) && rows.length <= 200 && rows.every(row => Array.isArray(row) && row.length <= 40 &&
+        row.every(cell => cell === null || typeof cell === 'string' || typeof cell === 'boolean' || Number.isFinite(cell)))) return rows;
+  } catch { /* Invalid structured workbook data. */ }
 }
 
 function validateGeneratedFile(name: unknown, content: unknown, allowEmpty: boolean): GeneratedFile | undefined {
   if (!isGeneratedFilename(name) || typeof content !== 'string' ||
       (!allowEmpty && !content.trim()) || content.includes('\0') ||
       Buffer.byteLength(content, 'utf8') > 32_768) return;
-  if (extname(name).toLowerCase() === '.json') {
+  const extension = extname(name).toLowerCase();
+  if (extension === '.xlsx' && !workbookRows(content)) return;
+  if (extension === '.json') {
     try { JSON.parse(content); } catch { return; }
   }
   return { name, content };
 }
 
 export async function saveGeneratedFile(folder: string, file: GeneratedFile): Promise<FileMatch> {
+  let content: string | Buffer = file.content;
+  if (/\.xlsx$/i.test(file.name)) {
+    const rows = workbookRows(file.content);
+    if (!rows) throw new Error('Invalid workbook data.');
+    const { default: writeExcelFile } = await import('write-excel-file/node');
+    const data = rows.map((row, index) => index === 0
+      ? row.map(value => value === null ? null : { value, fontWeight: 'bold' as const })
+      : row);
+    content = await writeExcelFile([{ sheet: 'Sheet1', data }]).toBuffer();
+  }
   await mkdir(folder, { recursive: true });
   const path = join(folder, file.name);
   const output = await open(path, 'wx');
   try {
-    await output.writeFile(file.content, 'utf8');
+    await output.writeFile(content, 'utf8');
     await output.close();
   } catch (error) {
     await output.close().catch(() => {});
     await unlink(path).catch(() => {});
     throw error;
   }
-  return { name: file.name, folder, path, modified: Date.now(), canOpen: /\.(?:txt|md|json)$/i.test(file.name) };
+  return { name: file.name, folder, path, modified: Date.now(), canOpen: /\.(?:txt|md|json|xlsx)$/i.test(file.name) };
 }
 
-function assistantRules(pet: PetContext, scope: string, tool?: string, filename?: string) {
-  const profile = JSON.stringify({
+function assistantRules(pet: PetContext | undefined, scope: string, tool?: string, filename?: string) {
+  const profile = pet && JSON.stringify({
     name: pet.name, fullness: Math.round(pet.food), energy: Math.round(pet.energy),
     bond: Math.round(pet.bond), asleep: pet.asleep,
   });
-  return [
-    'You are the Pet Pocket companion. Reply in plain English and lead with the answer.',
-    'Give a brief answer to a simple question. For a complex request, explain the useful steps or reasoning in the answer itself. Omit internal deliberation.',
-    'The user is on Windows. For desktop instructions, use Windows terminology and avoid guessing shortcuts or claiming knowledge of the user’s installed apps.',
-    'If details are missing, make a reasonable assumption and label it, or ask one specific question when it would change the answer. Say when you are unsure.',
-    'Respond to the latest user message. Use recent turns to resolve references and corrections. If two interpretations remain plausible, ask one focused question. Do not repeat an earlier action unless the user requests it again.',
-    'Use currentPet for questions about your name and care stats. Fullness below 30 means hungry and energy below 25 means tired. Do not infer access to the screen, web, or file contents.',
-    'currentPet: ' + profile,
-    tool
-      ? 'Use the supplied tool for the current requested action. Ask for missing arguments. Only the app reports action results.' +
-        (tool === 'find_files' ? ' File search covers ' + scope + '.' : '') +
-        (tool === 'create_file' ? ' Generate the full contents and call create_file. Honor the requested format and content constraints, including requests to omit code comments. Reuse prior chat text if asked to save it. Ask what the file should contain if no topic or text is given. The app handles the destination. ' +
-          (filename ? 'Use this exact filename as the name argument: ' + JSON.stringify(filename) + '.' : 'Choose an appropriate filename without a folder path.') : '')
-      : 'Answer questions normally. Pet Pocket can create and find local files, open those files in VS Code, launch supported shortcuts, manage open windows, and open Spotify search. Track playback requires selection in Spotify. Describe only relevant capabilities and never claim an action ran on this turn.',
-  ].join(' ');
+  const base = 'You are Ask Pet on Windows. Reply in clear English. Follow the latest user request. Earlier messages only resolve references. Ask one specific question if an essential detail is missing.';
+  if (tool === 'create_file') return base +
+    ' Return the complete requested contents with create_file. Follow the requested format and constraints, including requests to omit code comments. If asked to save a previous answer, use that answer as the contents. Pet Pocket handles saving and any other requested action.' +
+    (filename ? ' Use this exact filename: ' + JSON.stringify(filename) + '.' : ' Choose a filename without a folder path.');
+  if (tool === 'find_files') return base +
+    ' Use find_files to extract the filename or keyword, extension, and modification date. Pet Pocket searches ' + scope + ' and reports the results.';
+  if (tool) return base + ' Use only the supplied tool for the requested action. Pet Pocket executes it and reports the result.';
+  return base +
+    ' Answer the question directly and omit internal reasoning. You cannot inspect the screen, browse the web, or read files. Pet Pocket handles supported Windows actions. Do not claim you performed an action.' +
+    (profile ? ' Pet profile: ' + profile + '. Fullness below 30 means hungry and energy below 25 means tired.' : '');
 }
 
 function cleanReply(content: unknown) {
@@ -271,10 +365,7 @@ function quickIntent(text: string, petName: string): Intent | undefined {
   return undefined;
 }
 
-type OllamaMessage = {
-  content?: string;
-  tool_calls?: { function?: { name?: string; arguments?: Record<string, unknown> } }[];
-};
+type OllamaMessage = ModelMessage;
 
 async function readModelReply(response: Response, onDraft?: (text: string) => void): Promise<OllamaMessage> {
   if (!onDraft || !response.body) {
@@ -309,15 +400,13 @@ async function readModelReply(response: Response, onDraft?: (text: string) => vo
   } finally { reader.releaseLock(); }
 }
 
-export async function interpret(turns: Turn[], pet: PetContext, scope: string, onDraft?: (text: string) => void, spotify?: SpotifyContext): Promise<Intent> {
+export async function interpret(turns: Turn[], pet: PetContext, scope: string, onDraft?: (text: string) => void, spotify?: SpotifyContext,
+  ai?: { cloud?: CloudConfig; onRun?: (run: AiRun) => void; hasFileContext?: boolean }): Promise<Intent> {
   const latest = turns.at(-1)?.content ?? '';
-  const command = commandText(latest).replace(/^(?:now|then|actually|instead)[,\s]+/i, '');
-  const editor = /^open\s+(?:(.+?)\s+)?(?:in|with|using)\s+(?:vs\s*code|visual studio code)[.!?]*$/i.exec(command);
+  const command = commandText(latest);
+  const editor = /^open\s+(?:(.+?)\s+)?(?:in|with|using|sa)\s+(?:vs\s*code|visual studio code)[.!?]*$/i.exec(command);
   if (editor) {
-    const subject = editor[1]?.trim() ?? '';
-    const location = /\s+(?:in|inside|from)\s+(?:(?:my|the)\s+)?documents?(?:\s+(?:files?\s+)?folder)?$/i.exec(subject);
-    const target = location ? subject.slice(0, location.index).trim() : subject;
-    const folder = location ? 'documents' : undefined;
+    const { target, folder } = extractFileLocation(editor[1]?.trim() ?? '');
     if (!target || /^(?:it|that|this|(?:(?:that|this|the)\s+)?(?:last\s+)?file(?:\s+you\s+(?:just\s+)?(?:created|made|found|saved))?)$/i.test(target)) {
       return { type: 'open-in-vscode', folder };
     }
@@ -326,32 +415,72 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
   }
   const desktop = windowIntent(command);
   if (desktop) return desktop;
+  const edit = projectEdit(command, ai?.hasFileContext);
+  if (edit) return { type: 'project-edit', edit };
   const music = spotifyIntent(command, spotify);
   if (music) return music;
   const quick = quickIntent(command || latest, pet.name);
   if (quick) return quick;
+  if (/^(?:open|close|quit|exit|minimize|maximize|restore)\s+(?:it|that|this)[.!?]*$/i.test(command)) {
+    return { type: 'reply', message: 'Which app or file do you mean?' };
+  }
   const leadingLocation = leadingFileLocation.exec(command);
   const fileCommand = command.replace(leadingFileLocation, '');
   const tool = fileRequest(fileCommand) ? 'create_file' : requestedTool(command);
-  const inDownloads = /^download/i.test(leadingLocation?.[1] ?? '') || downloadsLocation.test(fileCommand);
-  const destination = inDownloads ? { destination: 'downloads' as const } : {};
-  if (tool === 'create_file' && /\b(?:as\s+(?:(?:an?|the)\s+)?|^(?:create|generate|make|write|save|export|draft|build)\s+(?:(?:me|us)\s+)?(?:(?:an?|the)\s+)?)(?:pdf|docx|xlsx|pptx|word\s+document|excel\s+(?:file|spreadsheet|workbook))\b|\.(?:pdf|docx|xlsx|pptx)(?=["'”’\s.!?]|$)/i.test(command)) {
+  const fileSearch = tool === 'find_files' ? fileSearchRequest(command) : undefined;
+  const searchFolder = fileSearch?.folder ? { folder: fileSearch.folder } : {};
+  if (fileSearch?.exact) return { type: 'find', search: { name: fileSearch.exact, extension: '', date: 'any', exact: true, ...searchFolder } };
+  const fileBody = fileCommand.replace(openCreatedFile, '');
+  const inDownloads = /^download/i.test(leadingLocation?.[1] ?? '') || downloadsLocation.test(fileBody);
+  const creation = {
+    ...(inDownloads ? { destination: 'downloads' as const } : {}),
+    ...(openCreatedFile.test(fileCommand) ? { openInVSCode: true as const } : {}),
+  };
+  if (tool === 'create_file' && /\b(?:as\s+(?:(?:an?|the)\s+)?|^(?:create|generate|make|write|save|export|draft|build)\s+(?:(?:me|us)\s+)?(?:(?:an?|the)\s+)?)(?:pdf|docx|pptx|word\s+document)\b|\.(?:pdf|docx|pptx)(?=["'”’\s.!?]|$)/i.test(command)) {
     return { type: 'reply', message: 'That file format isn’t available in Ask Pet yet. I can save ' + fileFormatList + ' files.' };
   }
   let filename: string | undefined;
+  let prompt = fileSearch?.prompt ?? latest;
   if (tool === 'create_file') {
-    const request = fileCommand.replace(downloadsLocation, '');
+    const request = fileBody.replace(downloadsLocation, '');
+    prompt = request;
     const named = /^(create|make|generate|write|save|export|draft|build|put)\s+(?:me\s+)?(?:an?\s+)?(?:(?:new|blank|empty)\s+)?(?:file\s+(?:named|called)\s+)?(?:"([^"]+)"|“([^”]+)”|`([^`]+)`|([^\s]+?\.[a-z0-9]+))(?:[\s,]+((?:with|containing|that|for|using|implementing|and)\b[\s\S]*))?[.!?]*$/i.exec(request);
     if (named) {
       const name = named[2] ?? named[3] ?? named[4] ?? named[5];
       if (!isGeneratedFilename(name)) return { type: 'reply', message: 'Use a filename with a supported extension and no folder path.' };
       filename = name;
       if (!named[6] && /^(?:create|make)$/i.test(named[1])) {
-        const content = extname(name).toLowerCase() === '.json' ? '{}\n' : '';
-        return { type: 'create-file', file: { name, content }, ...destination };
+        const extension = extname(name).toLowerCase();
+        const content = extension === '.json' ? '{}\n' : extension === '.xlsx' ? '[]' : '';
+        return { type: 'create-file', file: { name, content }, ...creation };
       }
     }
   }
+  const activeTools = tool ? tools.filter(entry => entry.function.name === tool) : [];
+  const system = assistantRules(pet, fileSearch?.folder ?? scope, tool, filename);
+  const allowEmpty = /\b(?:empty|blank)\b/i.test(command);
+  const needsLocalContext = /\b(?:offline only|locally only|without (?:the )?(?:cloud|internet)|your (?:name|energy|stats|bond)|(?:save|export|explain|revise|rewrite) (?:that|this|it)|(?:previous|last) (?:answer|reply|message))\b/i.test(command);
+  const desktopCommand = /^(?:open|launch|start|buksan|close|exit|quit|shut|focus|minimize|maximize|restore)\b/i.test(command);
+  let fallback: CloudConfig['provider'] | undefined;
+  if (ai?.cloud && (!tool || tool === 'create_file') && !needsLocalContext && !desktopCommand) {
+    try {
+      const result = await chatCloud(ai.cloud, assistantRules(undefined, scope, tool, filename), prompt, activeTools, tool ? 4096 : 1200);
+      const call = result.tool_calls?.[0]?.function;
+      if (tool === 'create_file') {
+        const file = call?.name === tool && validateGeneratedFile(filename ?? call.arguments?.name, call.arguments?.content, allowEmpty);
+        if (!file) throw new Error('Invalid generated file.');
+        ai.onRun?.({ engine: ai.cloud.provider });
+        return { type: 'create-file', file, ...creation };
+      }
+      const reply = cleanReply(result.content);
+      if (call || !reply) throw new Error('Invalid chat response.');
+      ai.onRun?.({ engine: ai.cloud.provider });
+      return { type: 'reply', message: reply };
+    } catch {
+      fallback = ai.cloud.provider;
+    }
+  }
+  ai?.onRun?.({ engine: 'qwen', ...(fallback ? { fallback } : {}) });
   const draft = tool ? undefined : onDraft;
   const history = turns.slice(-7, -1).map(turn => ({
     role: turn.role, content: turn.content.slice(0, tool === 'create_file' ? 1600 : 600),
@@ -366,12 +495,12 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
       signal,
       body: JSON.stringify({
         model, stream: Boolean(draft), think: false, keep_alive: '15m',
-        ...(tool ? { tools: tools.filter(entry => entry.function.name === tool) } : {}),
+        ...(tool ? { tools: activeTools } : {}),
         options: { num_ctx: tool === 'create_file' ? 6144 : 3072, num_predict: tool === 'create_file' ? 2048 : tool ? 120 : 240, temperature: tool ? 0 : .25 },
         messages: [{
           role: 'system',
-          content: assistantRules(pet, scope, tool, filename),
-        }, ...history, { role: 'user', content: latest }],
+          content: system,
+        }, ...history, { role: 'user', content: prompt }],
       }),
     });
     if (!response.ok) return {
@@ -393,15 +522,15 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
   if (call && call.name !== tool) return { type: 'reply', message: 'No action was run. Please ask directly if you want me to use a tool.' };
   const args = call?.arguments;
   if (call?.name === 'create_file') {
-    const file = validateGeneratedFile(filename ?? args?.name, args?.content, /\b(?:empty|blank)\b/i.test(command));
-    return file ? { type: 'create-file', file, ...destination } : { type: 'reply', message: 'Qwen didn’t return valid file contents. No file was saved.' };
+    const file = validateGeneratedFile(filename ?? args?.name, args?.content, allowEmpty);
+    return file ? { type: 'create-file', file, ...creation } : { type: 'reply', message: 'Qwen didn’t return valid file contents. No file was saved.' };
   }
   if (call?.name === 'find_files' && args) {
     const name = typeof args.name === 'string' ? args.name.trim().slice(0, 120) : '';
     const extension = typeof args.extension === 'string' ? args.extension.trim().replace(/^\./, '').toLowerCase() : '';
     const date = typeof args.date === 'string' && ['today', 'yesterday', 'last7days'].includes(args.date) ? args.date : 'any';
     if (!name && !extension && date === 'any') return { type: 'reply', message: 'What do you remember about the file? A word in the name, file type, or date would help.' };
-    return { type: 'find', search: { name, extension, date } };
+    return { type: 'find', search: { name, extension, date, ...searchFolder } };
   }
   if (call?.name === 'open_shortcut' && args && isLaunchTarget(args.target)) {
     return { type: 'launch', target: args.target };
@@ -418,7 +547,7 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
   if (tool === 'create_file') {
     return { type: 'reply', message: 'No file was saved.' + (reply.endsWith('?') ? ' ' + reply : ' Tell me what to put in it, or try a shorter request.') };
   }
-  if (/^(?:open|launch|start|buksan|close|exit|quit|shut)\b/i.test(command) &&
+  if (desktopCommand &&
       /\b(?:opened|launched|started|closed|exited|quit|is open|is now open|is running|successfully)\b/i.test(reply)) {
     return { type: 'reply', message: 'I couldn’t confirm that action. I can open Spotify, Arduino IDE, Calculator, or Downloads, and close the Spotify window.' };
   }
@@ -437,7 +566,8 @@ function modifiedWindow(date: string) {
 
 export async function findFiles(roots: string[], search: Search) {
   const dirs = [...new Set(roots)];
-  const tokens = search.name.toLowerCase().split(/\s+/).filter(Boolean);
+  const name = search.name.toLowerCase();
+  const tokens = name.split(/\s+/).filter(Boolean);
   const [after, before] = modifiedWindow(search.date);
   const matches: FileMatch[] = [];
   const deadline = Date.now() + 6500;
@@ -454,7 +584,9 @@ export async function findFiles(roots: string[], search: Search) {
           if (!ignoredDirectories.has(entry.name.toLowerCase())) dirs.push(path);
           continue;
         }
-        if (!entry.isFile() || !tokens.every(token => entry.name.toLowerCase().includes(token))) continue;
+        if (!entry.isFile()) continue;
+        const filename = entry.name.toLowerCase();
+        if (search.exact ? filename !== name : !tokens.every(token => filename.includes(token))) continue;
         const extension = extname(entry.name).toLowerCase();
         if (search.extension && extension !== '.' + search.extension) continue;
         const info = await stat(path).catch(() => null);
