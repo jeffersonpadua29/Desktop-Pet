@@ -3,14 +3,31 @@ type PlayStage = { right: number; bottom: number; floors: PlayDisplay[] };
 
 type Snapshot = import('./pet').Pet;
 type Species = import('./pet').Species;
-type HomeSnapshot = { pet: Snapshot | null; playing: boolean; names: Partial<Record<Species, string>> };
+type Preferences = import('./settings').Preferences;
+type WeatherLocation = import('./weather').WeatherLocation;
+type WeatherState = import('./weather').WeatherState;
+type Routine = import('./routines').Routine;
+type RoutineState = import('./routines').RoutineState;
+type Companion = ReturnType<typeof import('./pet').companionDetails>;
+type HomeSnapshot = { pet: Snapshot | null; playing: boolean; names: Partial<Record<Species, string>>; preferences: Preferences; quietHoursActive: boolean; weather: WeatherState; routines: Routine[]; routine: RoutineState; companion: Companion | null };
 const api = (window as Window & { anino?: {
   setupNotifications: () => Promise<boolean>;
-  onAlert: (callback: (alert: { source: string; message: string; count: number }) => void) => void;
+  onAlert: (callback: (alert: { source: string; message: string; count: number; silent: boolean }) => void) => void;
+  onOpenControls: (callback: () => void) => void;
+  onCareFeedback: (callback: (reaction: { mood: string; message: string }) => void) => void;
+  preferences: (input: Preferences) => Promise<HomeSnapshot>;
+  routines: (input: Routine[]) => Promise<HomeSnapshot>;
+  customizePet: (input: { personality: string; accessory: string }) => Promise<HomeSnapshot>;
+  returnToScreen: () => Promise<void>;
+  weatherSearch: (query: string) => Promise<WeatherLocation[]>;
+  weatherLocation: (location: WeatherLocation | null) => Promise<HomeSnapshot>;
+  weatherDetect: () => Promise<HomeSnapshot>;
+  weatherRefresh: () => Promise<HomeSnapshot>;
+  weatherProvider: () => Promise<void>;
   roam: (start: boolean) => Promise<{ duration: number; facing: string } | null>;
   toyStage: (open: boolean) => Promise<PlayStage | undefined>;
   hit: (hit: boolean) => void;
-  drag: (x: number, y: number) => void;
+  drag: (phase: 'start' | 'move' | 'end') => void;
   status: () => Promise<HomeSnapshot>;
   select: (kind: Species, name: string) => Promise<HomeSnapshot>;
   command: (input: string) => Promise<{ message: string; mood?: string }>;
@@ -18,12 +35,83 @@ const api = (window as Window & { anino?: {
 } }).anino!;
 const petButton = document.querySelector<HTMLButtonElement>('#pet')!;
 const panel = document.querySelector<HTMLElement>('#panel')!;
+let preferences: Preferences;
+let quietHoursActive = false;
+const preferencesForm = document.querySelector<HTMLFormElement>('#preferences')!;
+let preferencesDirty = false;
+let renderedPreferences = '';
+let weatherAction = false;
+let weatherNotice = '';
+let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
+let routines: Routine[] = [];
+let routine: RoutineState = { active: null, occurrence: '', ends: 0 };
+let currentWeatherScene: import('./weather').WeatherScene | 'none' = 'none';
+let renderedRoutines = '';
+let editingRoutineId: string | null = null;
+let routineBusy = false;
+let companionDirty = false;
+let renderedCompanion = '';
+let companionPetKind = '';
+
+function feedback(message: string) {
+  clearTimeout(feedbackTimer);
+  const label = document.querySelector<HTMLElement>('#pet-feedback')!;
+  label.textContent = message;
+  label.hidden = false;
+  feedbackTimer = setTimeout(() => { label.hidden = true; }, 2800);
+}
+
+function renderPreferences(state: HomeSnapshot) {
+  const previewsChanged = preferences?.alertPreviews !== state.preferences.alertPreviews;
+  preferences = state.preferences;
+  quietHoursActive = state.quietHoursActive;
+  document.documentElement.style.setProperty('--pet-scale', String({ small: .75, medium: 1, large: 1.25 }[preferences.size]));
+  petButton.toggleAttribute('data-locked', preferences.locked);
+  const serialized = JSON.stringify(preferences);
+  if (!preferencesDirty && serialized !== renderedPreferences) {
+    for (const [name, value] of Object.entries(preferences)) {
+      const control = preferencesForm.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement;
+      if (control instanceof HTMLInputElement && control.type === 'checkbox') control.checked = Boolean(value);
+      else control.value = String(value);
+    }
+    renderedPreferences = serialized;
+  }
+  document.querySelector('#quiet-status')!.textContent = quietHoursActive ? 'A quiet period is active. Alerts are saved to your inbox.' : '';
+  if (quietHoursActive || !preferences.alertPopups) petAlert.hidden = true;
+  if (!preferences.alertPreviews) document.querySelector<HTMLElement>('#pet-alert-message')!.hidden = true;
+  if (previewsChanged) renderInbox();
+}
+
+function renderWeather(state: WeatherState) {
+  currentWeatherScene = preferences.weatherReactions && state.location && state.report && !state.error && Date.now() - state.report.updated <= 3600000 ? state.report.scene ?? 'none' : 'none';
+  document.querySelector<HTMLElement>('.display')!.dataset.weather = currentWeatherScene;
+  const weatherReaction = document.querySelector<HTMLElement>('#weather-reaction')!;
+  const labels = { none: '', clear: 'Clear skies', cloudy: 'Cloudy surroundings', rain: 'Rainy day · umbrella ready', storm: 'Stormy skies · umbrella ready', snow: 'Snowy day · bundled up', cold: 'Chilly weather · keeping warm', hot: 'Warm weather · taking it easy', wind: 'Windy surroundings' };
+  weatherReaction.textContent = labels[currentWeatherScene];
+  weatherReaction.hidden = currentWeatherScene === 'none';
+  document.querySelector('#weather-location')!.textContent = state.location ? state.location.name + (state.location.source === 'ip' ? ' (approximate)' : '') : 'Choose your location below.';
+  document.querySelector('#weather-report')!.textContent = state.report ? Math.round(state.report.temperature) + ' °C · ' + state.report.summary + '. ' + state.report.advisory : '';
+  document.querySelector('#weather-updated')!.textContent = state.report ? 'Updated ' + new Date(state.report.updated).toLocaleString() : '';
+  if (!weatherAction) document.querySelector('#weather-error')!.textContent = state.error || weatherNotice || (state.loading ? 'Updating weather…' : '');
+  document.querySelector<HTMLButtonElement>('#weather-refresh')!.disabled = weatherAction || state.loading || !state.location;
+  document.querySelector<HTMLElement>('#weather-clear')!.hidden = !state.location;
+}
 let reactionUntil = 0;
 let nextIdleAt = Date.now() + 3500;
 let roamUntil = 0;
 let roamTurnAt = 0;
 let roamReturnFacing = 'left';
 let requestingRoam = false;
+
+function movementPaused() {
+  return preferences.locked || effectiveRoaming() === 'off' || quietHoursActive;
+}
+
+function effectiveRoaming() {
+  if (routine.active?.activity === 'roam') return preferences.roamFrequency === 'off' ? 'normal' : preferences.roamFrequency;
+  if (routine.active) return 'off';
+  return preferences.roamFrequency;
+}
 
 function stopIdleRoam() {
   if (!roamUntil && !requestingRoam) return;
@@ -40,17 +128,19 @@ async function tryIdleMove(state: Snapshot) {
   }
   if (roamUntil && now >= roamTurnAt) petButton.dataset.facing = roamReturnFacing;
   const mood = petButton.dataset.mood;
-  if (playing || state.nap || !panel.hidden || !petAlert.hidden || busy || aiming || drag || document.hidden) {
+  if (movementPaused() || playing || state.nap || !panel.hidden || !petAlert.hidden || busy || aiming || drag || document.hidden) {
     stopIdleRoam();
     return;
   }
   if (requestingRoam || roamUntil || lastHit || now < nextIdleAt || (mood !== 'idle' && mood !== 'happy')) return;
-  nextIdleAt = now + 9500 + Math.random() * 13500;
+  const personalityPace = { curious: .8, playful: .9, gentle: 1.25, dreamy: 1.5 }[state.personality];
+  const interval = { off: 0, rarely: 60000, normal: 9500, often: 3500 }[effectiveRoaming()] * personalityPace;
+  nextIdleAt = now + interval + Math.random() * interval;
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches && Math.random() < .42) {
     requestingRoam = true;
     try {
       const movement = await api.roam(true);
-      if (movement && panel.hidden && petAlert.hidden && !playing && !aiming && !busy && !drag && !lastHit && !document.hidden) {
+      if (movement && !movementPaused() && panel.hidden && petAlert.hidden && !playing && !aiming && !busy && !drag && !lastHit && !document.hidden) {
         const started = Date.now();
         roamUntil = started + movement.duration;
         roamTurnAt = started + movement.duration / 2;
@@ -62,9 +152,9 @@ async function tryIdleMove(state: Snapshot) {
       if (movement) void api.roam(false);
     } finally { requestingRoam = false; }
   }
-  if (panel.hidden && petAlert.hidden && !playing && !aiming && !busy && !drag && !lastHit && !document.hidden) {
+  if (!movementPaused() && panel.hidden && petAlert.hidden && !playing && !aiming && !busy && !drag && !lastHit && !document.hidden) {
     reactionUntil = Date.now() + 1550;
-    petButton.dataset.mood = Math.random() < .66 ? 'fidget' : 'look';
+    petButton.dataset.mood = state.personality === 'playful' ? 'happy' : state.personality === 'dreamy' ? 'look' : Math.random() < .66 ? 'fidget' : 'look';
   }
 }
 let playing = false;
@@ -72,7 +162,7 @@ let musicSince = 0;
 let lastHit = false;
 let busy = false;
 let aiming = false;
-let drag: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | undefined;
+let drag: { id: number; x: number; y: number; moved: boolean } | undefined;
 let revision = 0;
 function setHit(hit: boolean) {
   if (hit === lastHit) return;
@@ -108,10 +198,16 @@ function showPicker(show: boolean) {
   }
 }
 function renderHome(state: HomeSnapshot) {
+  routines = state.routines;
+  routine = state.routine;
+  renderPreferences(state);
+  renderWeather(state.weather);
+  renderRoutines();
   names = state.names;
   if (state.playing !== playing) musicSince = state.playing ? Date.now() : 0;
   playing = state.playing;
   active = state.pet;
+  renderCompanion(state);
   petButton.hidden = !active;
   if (active) {
     homePanel.hidden = picking;
@@ -123,7 +219,7 @@ function render(state: Snapshot) {
   petButton.dataset.kind = state.kind;
   const portrait = document.querySelector<HTMLElement>('#portrait')!;
   portrait.dataset.kind = state.kind;
-  petButton.setAttribute('aria-label', state.name + '. Click for controls or drag to move.');
+  petButton.setAttribute('aria-label', state.name + (preferences.locked ? '. Position locked. Click for controls.' : '. Click for controls or drag to move.'));
   document.querySelector('#pet-name')!.textContent = state.name;
   for (const key of ['food', 'energy', 'bond'] as const) {
     document.querySelector<HTMLMeterElement>('#' + key)!.value = state[key];
@@ -136,12 +232,15 @@ function render(state: Snapshot) {
   const tired = state.energy < 25;
   const needMood = hungry && (!tired || state.food / 30 <= state.energy / 25) ? 'hungry' : tired ? 'tired' : '';
   portrait.dataset.mood = state.nap ? 'sleep' : needMood;
+  const playtime = routine.active?.activity === 'play' && !quietHoursActive && !state.nap && state.energy >= 8;
   const need = document.querySelector<HTMLElement>('#pet-need')!;
   need.textContent = hungry && tired ? 'Hungry and tired' : hungry ? 'Hungry' : tired ? 'Low energy' : '';
   need.hidden = !need.textContent;
-  if (aiming) petButton.dataset.mood = 'crouch';
+  if (drag && !preferences.locked) petButton.dataset.mood = 'carry';
+  else if (aiming) petButton.dataset.mood = 'crouch';
   else if (state.nap) petButton.dataset.mood = 'sleep';
   else if (roamUntil > Date.now()) petButton.dataset.mood = 'run';
+  else if (playtime && Date.now() >= reactionUntil) petButton.dataset.mood = 'happy';
   else if (Date.now() >= reactionUntil || (playing && petButton.dataset.mood === 'headphones')) {
     const playful = state.food > 65 && state.energy > 60 && Date.now() % 16000 < 1200;
     const elapsed = Date.now() - musicSince;
@@ -157,6 +256,10 @@ function render(state: Snapshot) {
     return li;
   }));
   const asleep = Boolean(state.nap) || petButton.dataset.mood === 'sleep';
+  petButton.dataset.weather = !asleep && !drag && !busy && !aiming ? currentWeatherScene : 'none';
+  document.documentElement.style.setProperty('--weather-clearance', petButton.dataset.weather === 'rain' || petButton.dataset.weather === 'storm' ? '25px' : '0px');
+  petButton.dataset.accessory = state.accessory;
+  petButton.toggleAttribute('data-routine-play', playtime && !drag && !busy && !aiming);
   const sleepControl = document.querySelector<HTMLButtonElement>('#sleep-control')!;
   sleepControl.dataset.action = asleep ? 'wake' : 'sleep';
   document.querySelector('#sleep-label')!.textContent = asleep ? 'Wake up' : 'Sleep';
@@ -180,21 +283,42 @@ document.documentElement.addEventListener('mouseleave', () => {
 });
 petButton.addEventListener('pointerdown', event => {
   if (event.button !== 0 || busy || aiming) return;
-  drag = { id: event.pointerId, x: event.screenX, y: event.screenY, left: window.screenX, top: window.screenY, moved: false };
+  if (!preferences.locked) api.drag('start');
+  stopIdleRoam();
+  drag = { id: event.pointerId, x: event.screenX, y: event.screenY, moved: false };
+  if (preferences.locked) feedback('Position locked. Unlock in Settings.');
+  else {
+    petButton.dataset.dragging = '';
+    petButton.dataset.weather = 'none';
+    petButton.removeAttribute('data-routine-play');
+    petButton.dataset.mood = 'carry';
+  }
   petButton.setPointerCapture(event.pointerId);
 });
 petButton.addEventListener('pointermove', event => {
-  if (!drag || drag.id !== event.pointerId) return;
+  if (!drag || drag.id !== event.pointerId || preferences.locked) return;
   const dx = event.screenX - drag.x, dy = event.screenY - drag.y;
   if (Math.abs(dx) + Math.abs(dy) >= 5) drag.moved = true;
-  if (drag.moved) api.drag(Math.round(drag.left + dx), Math.round(drag.top + dy));
+  if (drag.moved) api.drag('move');
 });
 petButton.addEventListener('pointerup', event => {
   if (drag?.id !== event.pointerId) return;
   if (!drag.moved) togglePanel();
+  else {
+    reactionUntil = Date.now() + 900;
+    petButton.dataset.mood = active?.nap ? 'sleep' : 'happy';
+    feedback('Settled in!');
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches) document.querySelector('.pet-art')!.animate([{ translate: '0 -3px' }, { translate: '0 0' }], { duration: 220, easing: 'ease-out' });
+  }
   drag = undefined;
+  delete petButton.dataset.dragging;
 });
-petButton.addEventListener('lostpointercapture', () => { drag = undefined; });
+petButton.addEventListener('lostpointercapture', () => {
+  drag = undefined;
+  delete petButton.dataset.dragging;
+  api.drag('end');
+  nextIdleAt = Date.now() + 3500;
+});
 petButton.addEventListener('click', event => { if (event.detail === 0) togglePanel(); });
 const ball = document.querySelector<HTMLElement>('#toy-ball')!;
 const toyHint = document.querySelector<HTMLElement>('#toy-hint')!;
@@ -219,6 +343,8 @@ async function endAim() {
 
 async function startAim() {
   stopIdleRoam();
+  petButton.dataset.weather = 'none';
+  petButton.removeAttribute('data-routine-play');
   petAlert.hidden = true;
   busy = true;
   panel.hidden = true;
@@ -430,6 +556,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]
       reactionUntil = Date.now() + 1500;
       petButton.dataset.mood = result.mood;
       message.textContent = result.message;
+      feedback(result.message);
       busy = false;
       render(result.pet);
     } catch {
@@ -533,7 +660,7 @@ function renderInbox() {
     const time = document.createElement('time');
     time.textContent = new Date(alert.time).toLocaleString();
     const text = document.createElement('p');
-    text.textContent = alert.message || 'Message preview unavailable.';
+    text.textContent = preferences?.alertPreviews === false ? 'Message previews are hidden.' : alert.message || 'Message preview unavailable.';
     row.append(source, time, text);
     return row;
   });
@@ -543,11 +670,11 @@ function renderInbox() {
 }
 
 function showPetAlert(source: string, message: string, count = 1) {
-  if (!active || document.hidden || aiming) return;
+  if (!active || document.hidden || aiming || drag || quietHoursActive || preferences?.alertPopups === false) return;
   document.querySelector('#pet-alert-heading')!.textContent = count > 1 ? 'Boss, you have ' + count + ' new alerts.' : 'Boss, an alert from ' + source + '.';
   const body = document.querySelector<HTMLElement>('#pet-alert-message')!;
-  body.textContent = message;
-  body.hidden = !message;
+  body.textContent = preferences?.alertPreviews === false ? '' : message;
+  body.hidden = !body.textContent;
   stopIdleRoam();
   petAlert.hidden = false;
   if (!active.nap) {
@@ -582,11 +709,243 @@ document.addEventListener('visibilitychange', () => {
 });
 
 renderInbox();
-api.onAlert(({ source, message, count }) => {
+api.onAlert(({ source, message, count, silent }) => {
   inbox = [{ source, message, count, time: Date.now() }, ...inbox].slice(0, 20);
   saveInbox();
   renderInbox();
-  showPetAlert(source, message, count);
+  if (!silent) showPetAlert(source, message, count);
+});
+
+preferencesForm.addEventListener('input', () => { preferencesDirty = true; });
+preferencesForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const result = document.querySelector('#settings-result')!;
+  const values: Record<string, string | boolean> = {};
+  for (const name of Object.keys(preferences)) {
+    const control = preferencesForm.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement;
+    values[name] = control instanceof HTMLInputElement && control.type === 'checkbox' ? control.checked : control.value;
+  }
+  const controls = [...preferencesForm.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('input, select, button')];
+  controls.forEach(control => { control.disabled = true; });
+  revision++;
+  try {
+    const state = await api.preferences(values as Preferences);
+    preferencesDirty = false;
+    renderHome(state);
+    result.textContent = 'Settings saved.';
+  } catch { result.textContent = 'Could not save settings. Try again.'; }
+  finally { controls.forEach(control => { control.disabled = false; }); }
+});
+
+document.querySelector('#return-to-screen')!.addEventListener('click', async () => {
+  try { await api.returnToScreen(); feedback('Back on screen!'); }
+  catch { document.querySelector('#settings-result')!.textContent = 'Could not reposition the pet.'; }
+});
+api.onOpenControls(() => {
+  if (busy) return;
+  if (aiming) { void endAim(); return; }
+  stopIdleRoam();
+  panel.hidden = false;
+  petButton.setAttribute('aria-expanded', 'true');
+});
+api.onCareFeedback(reaction => {
+  if (busy || aiming || drag) return;
+  reactionUntil = Date.now() + 1500;
+  petButton.dataset.mood = reaction.mood;
+  document.querySelector('#message')!.textContent = reaction.message;
+  feedback(reaction.message);
+});
+
+async function weatherTask(action: () => Promise<void>) {
+  if (weatherAction) return;
+  weatherAction = true;
+  const controls = [...document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('.weather-card button, .weather-card input')];
+  controls.forEach(control => { control.disabled = true; });
+  weatherNotice = 'Updating…';
+  document.querySelector('#weather-error')!.textContent = weatherNotice;
+  try { await action(); }
+  catch {
+    weatherNotice = 'Could not update weather. Check your connection and try again.';
+    document.querySelector('#weather-error')!.textContent = weatherNotice;
+  }
+  finally {
+    weatherAction = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
+}
+document.querySelector('#weather-search')!.addEventListener('submit', event => {
+  event.preventDefault();
+  void weatherTask(async () => {
+    const results = await api.weatherSearch(document.querySelector<HTMLInputElement>('#weather-city')!.value);
+    document.querySelector('#weather-results')!.replaceChildren(...results.map(location => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = location.name;
+      button.addEventListener('click', () => {
+        void weatherTask(async () => {
+          const state = await api.weatherLocation(location);
+          renderHome(state);
+          document.querySelector('#weather-results')!.replaceChildren();
+          weatherNotice = '';
+          document.querySelector('#weather-error')!.textContent = state.weather.error;
+        });
+      });
+      return button;
+    }));
+    weatherNotice = results.length ? 'Choose a location above.' : 'No matching cities. Try a nearby city or add a country.';
+    document.querySelector('#weather-error')!.textContent = weatherNotice;
+  });
+});
+for (const [selector, action] of [
+  ['#weather-detect', () => api.weatherDetect()],
+  ['#weather-refresh', () => api.weatherRefresh()],
+  ['#weather-clear', () => api.weatherLocation(null)],
+] as const) {
+  document.querySelector(selector)!.addEventListener('click', () => {
+    void weatherTask(async () => {
+      const state = await action();
+      renderHome(state);
+      document.querySelector('#weather-results')!.replaceChildren();
+      weatherNotice = '';
+      document.querySelector('#weather-error')!.textContent = state.weather.error;
+    });
+  });
+}
+document.querySelector('#weather-provider')!.addEventListener('click', event => { event.preventDefault(); void api.weatherProvider(); });
+
+function renderRoutines() {
+  const status = document.querySelector('#routine-active')!;
+  const text = routine.active ? routine.active.name + ' · ' + routine.active.activity + ' until ' + new Date(routine.ends).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'No routine is active.';
+  if (status.textContent !== text) status.textContent = text;
+  const serialized = JSON.stringify(routines);
+  if (renderedRoutines === serialized) return;
+  renderedRoutines = serialized;
+  const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  document.querySelector('#routines-list')!.replaceChildren(...routines.map(item => {
+    const row = document.createElement('li');
+    const name = document.createElement('strong');
+    name.textContent = item.name + (item.enabled ? '' : ' (paused)');
+    const details = document.createElement('p');
+    details.textContent = item.activity + ' · ' + item.days.map(day => weekdays[day]).join(', ') + ' · ' + item.start + '–' + item.end;
+    const actions = document.createElement('div');
+    actions.className = 'settings-row';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.textContent = item.enabled ? 'Pause' : 'Enable';
+    toggle.addEventListener('click', () => { void saveRoutines(routines.map(value => value.id === item.id ? { ...value, enabled: !value.enabled } : value)); });
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => {
+      if (routineBusy) return;
+      editingRoutineId = item.id;
+      document.querySelector<HTMLInputElement>('#routine-name')!.value = item.name;
+      document.querySelector<HTMLSelectElement>('#routine-activity')!.value = item.activity;
+      document.querySelector<HTMLInputElement>('#routine-start')!.value = item.start;
+      document.querySelector<HTMLInputElement>('#routine-end')!.value = item.end;
+      for (const day of document.querySelectorAll<HTMLInputElement>('#routine-editor [name="day"]')) day.checked = item.days.includes(Number(day.value));
+      document.querySelector('#routine-save')!.textContent = 'Save routine';
+      document.querySelector<HTMLElement>('#routine-cancel')!.hidden = false;
+      document.querySelector('#routine-editor')!.scrollIntoView({ block: 'nearest' });
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', async () => {
+      if (await saveRoutines(routines.filter(value => value.id !== item.id)) && editingRoutineId === item.id) resetRoutineEditor();
+    });
+    actions.append(toggle, edit, remove);
+    row.append(name, details, actions);
+    return row;
+  }));
+}
+
+async function saveRoutines(input: Routine[]) {
+  if (routineBusy) return false;
+  routineBusy = true;
+  const controls = [...document.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>('.routine-card input, .routine-card button, .routine-card select')];
+  controls.forEach(control => { control.disabled = true; });
+  revision++;
+  try {
+    renderHome(await api.routines(input));
+    document.querySelector('#routine-result')!.textContent = 'Routines saved.';
+    return true;
+  } catch {
+    document.querySelector('#routine-result')!.textContent = 'Could not save routines. Try again.';
+    return false;
+  } finally {
+    routineBusy = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
+}
+
+function resetRoutineEditor() {
+  editingRoutineId = null;
+  document.querySelector<HTMLFormElement>('#routine-editor')!.reset();
+  document.querySelector('#routine-save')!.textContent = 'Add routine';
+  document.querySelector<HTMLElement>('#routine-cancel')!.hidden = true;
+}
+document.querySelector('#routine-cancel')!.addEventListener('click', resetRoutineEditor);
+document.querySelector('#routine-editor')!.addEventListener('submit', async event => {
+  event.preventDefault();
+  const days = [...document.querySelectorAll<HTMLInputElement>('#routine-editor [name="day"]:checked')].map(day => Number(day.value));
+  const start = document.querySelector<HTMLInputElement>('#routine-start')!.value;
+  const end = document.querySelector<HTMLInputElement>('#routine-end')!.value;
+  if (!days.length || start === end || (!editingRoutineId && routines.length >= 12)) {
+    document.querySelector('#routine-result')!.textContent = 'Select at least one weekday, use different times, and keep at most 12 routines.';
+    return;
+  }
+  const previous = routines.find(item => item.id === editingRoutineId);
+  const item: Routine = {
+    id: editingRoutineId ?? crypto.randomUUID(), name: document.querySelector<HTMLInputElement>('#routine-name')!.value.trim(),
+    activity: document.querySelector<HTMLSelectElement>('#routine-activity')!.value as Routine['activity'],
+    start, end, days, enabled: previous?.enabled ?? true,
+  };
+  const updated = editingRoutineId ? routines.map(value => value.id === editingRoutineId ? item : value) : [...routines, item];
+  if (await saveRoutines(updated)) resetRoutineEditor();
+});
+
+function renderCompanion(state: HomeSnapshot) {
+  if (!state.pet || !state.companion) return;
+  const details = state.companion;
+  document.querySelector('#friendship-tier')!.textContent = details.tier + ' · ' + Math.round(state.pet.bond) + '/100 friendship';
+  document.querySelector('#favorite-activity')!.textContent = details.personality + ' · Favorite activity — ' + details.favorite;
+  document.querySelector('#pet-habit')!.textContent = details.habit;
+  document.querySelector('#next-milestone')!.textContent = details.next;
+  if (companionPetKind !== state.pet.kind) {
+    companionDirty = false;
+    companionPetKind = state.pet.kind;
+    renderedCompanion = '';
+    document.querySelector('#companion-result')!.textContent = '';
+  }
+  const serialized = JSON.stringify([state.pet.kind, state.pet.personality, state.pet.accessory, details.accessories]);
+  if (companionDirty || renderedCompanion === serialized) return;
+  renderedCompanion = serialized;
+  document.querySelector<HTMLSelectElement>('#pet-personality')!.value = state.pet.personality;
+  const select = document.querySelector<HTMLSelectElement>('#pet-accessory')!;
+  select.replaceChildren(...details.accessories.map(item => {
+    const option = document.createElement('option');
+    option.value = item.id;
+    option.textContent = item.name + (item.unlocked ? '' : ' · unlocks at ' + item.bond);
+    option.disabled = !item.unlocked;
+    return option;
+  }));
+  select.value = state.pet.accessory;
+}
+const companionEditor = document.querySelector<HTMLFormElement>('#companion-editor')!;
+companionEditor.addEventListener('change', () => { companionDirty = true; });
+companionEditor.addEventListener('submit', async event => {
+  event.preventDefault();
+  const controls = [...companionEditor.querySelectorAll<HTMLSelectElement | HTMLButtonElement>('select, button')];
+  controls.forEach(control => { control.disabled = true; });
+  revision++;
+  try {
+    const state = await api.customizePet({ personality: document.querySelector<HTMLSelectElement>('#pet-personality')!.value, accessory: document.querySelector<HTMLSelectElement>('#pet-accessory')!.value });
+    companionDirty = false;
+    renderHome(state);
+    document.querySelector('#companion-result')!.textContent = 'Companion saved.';
+  } catch { document.querySelector('#companion-result')!.textContent = 'Could not save your companion. Check that the accessory is unlocked.'; }
+  finally { controls.forEach(control => { control.disabled = false; }); }
 });
 
 

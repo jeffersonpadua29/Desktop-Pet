@@ -2,21 +2,27 @@
   "name": "anino-desktop-pet",
   "version": "1.0.0",
   "description": "A tiny gremlin for your Windows desktop",
+  "keywords": [],
+  "homepage": "https://github.com/jeffersonpadua29/LocalAI#readme",
+  "bugs": {
+    "url": "https://github.com/jeffersonpadua29/LocalAI/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeffersonpadua29/LocalAI.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
     "start": "npm run build && electron .",
     "setup:notifications": "powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File setup/Install-Notifications.ps1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "devDependencies": {
     "@types/node": "^26.6.6",
     "electron": "^45.2.1",
     "typescript": "^7.0.2"
   }
 }
-
-

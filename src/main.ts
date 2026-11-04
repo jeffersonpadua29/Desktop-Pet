@@ -3,7 +3,10 @@ import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { act, advance, fresh, isSpecies, type Pet, type Species } from './pet';
+import { act, advance, fresh, isSpecies, companionDetails, customizePet, type Pet, type Species } from './pet';
+import { defaultPreferences, normalizePreferences, isQuietTime } from './settings';
+import { detectLocation, searchLocations, normalizeLocation, fetchWeather, type WeatherLocation, type WeatherState } from './weather';
+import { routineAt, restoreRoutines, validateRoutines, type Routine, type RoutineState } from './routines';
 
 app.setName('Anino');
 const root = join(__dirname, '..');
@@ -15,19 +18,112 @@ let home = {
   position: null as { x: number; y: number } | null,
   quiet: false,
   notificationSetupOffered: false,
+  preferences: { ...defaultPreferences },
+  weatherLocation: null as WeatherLocation | null,
+  weatherLastAlert: { key: '', time: 0 },
+  routines: [] as Routine[],
+  routineRuns: {} as Record<string, string>,
 };
+let routineState: RoutineState = { active: null, occurrence: '', ends: 0 };
+
+function quietNow() {
+  return isQuietTime(home.preferences) || routineAt(home.routines).active?.activity === 'quiet';
+}
+
+function syncRoutines(now: number) {
+  routineState = routineAt(home.routines, new Date(now));
+  let changed = false;
+  for (const pet of Object.values(home.pets)) {
+    if (!pet?.routineSleep || (routineState.active?.activity === 'sleep' && pet.routineSleep.occurrence === routineState.occurrence)) continue;
+    const key = pet.routineSleep.occurrence.split('/')[0] + ':' + pet.kind;
+    if (home.routineRuns[key] === pet.routineSleep.occurrence) delete home.routineRuns[key];
+    if (pet.nap === pet.routineSleep.until) {
+      const wakeUntil = pet.wakeUntil;
+      act(pet, 'wake', now);
+      pet.wakeUntil = wakeUntil;
+    }
+    pet.routineSleep = null;
+    changed = true;
+  }
+  const active = routineState.active;
+  const pet = currentPet();
+  if (active && active.activity !== 'roam') stopRoam(false);
+  if (active && pet && !toyHome && !dragOffset && (active.activity === 'sleep' || active.activity === 'play')) {
+    const key = active.id + ':' + pet.kind;
+    if (home.routineRuns[key] !== routineState.occurrence) {
+      home.routineRuns[key] = routineState.occurrence;
+      changed = true;
+      if (active.activity === 'play') {
+        const reaction = act(pet, 'throw', now);
+        if (win) win.webContents.send('care-feedback', reaction);
+      } else if ((pet.wakeUntil ?? 0) <= now) {
+        act(pet, 'sleep', now);
+        pet.nap = routineState.ends;
+        pet.routineSleep = { occurrence: routineState.occurrence, started: now, until: routineState.ends };
+      }
+    }
+  }
+  if (changed) save();
+}
+let weather: WeatherState = { location: null, report: null, error: '', loading: false };
+let weatherRequest: Promise<void> | undefined;
+let nextWeatherCheck = 0;
+let lastWeatherAttempt = 0;
+
+function sendPetAlert(source: string, message: string, count = 1, weatherAlert = false) {
+  const prefs = home.preferences;
+  if (!currentPet() || (weatherAlert ? !prefs.weatherAlerts : !prefs.desktopAlerts)) return false;
+  win.webContents.send('pet-alert', {
+    source, message: prefs.alertPreviews ? message : '', count,
+    silent: home.quiet || quietNow() || !prefs.alertPopups || !win.isVisible(),
+  });
+  return true;
+}
+
+async function updateWeather(force = false) {
+  if (weatherRequest) return weatherRequest;
+  if (!home.weatherLocation || (!force && (!home.preferences.weatherAlerts || Date.now() < nextWeatherCheck))) return;
+  if (force && Date.now() - lastWeatherAttempt < 60000) return;
+  const location = home.weatherLocation;
+  lastWeatherAttempt = Date.now();
+  nextWeatherCheck = Date.now() + 30 * 60000;
+  weather.loading = true;
+  weatherRequest = (async () => {
+    try {
+      const report = await fetchWeather(location);
+      if (home.weatherLocation !== location) return;
+      weather = { location, report, error: '', loading: true };
+      const key = location.latitude + ',' + location.longitude + ':' + report.hazard;
+      if (report.hazard && (home.weatherLastAlert.key !== key || Date.now() - home.weatherLastAlert.time >= 6 * 3600000) &&
+          sendPetAlert('Weather', location.name + '. ' + report.advisory, 1, true)) {
+        home.weatherLastAlert = { key, time: Date.now() };
+        save();
+      }
+    } catch {
+      if (home.weatherLocation === location) weather.error = 'Weather unavailable. Check your connection or try again later.';
+      nextWeatherCheck = Date.now() + 5 * 60000;
+    } finally {
+      weather.loading = false;
+      weatherRequest = undefined;
+    }
+  })();
+  return weatherRequest;
+}
 function currentPet() {
   return home.active ? home.pets[home.active] ?? null : null;
 }
 function updatePets() {
   const now = Date.now();
   for (const pet of Object.values(home.pets)) if (pet) advance(pet, now);
+  syncRoutines(now);
 }
 function status() {
   updatePets();
   const names: Partial<Record<Species, string>> = {};
   for (const pet of Object.values(home.pets)) if (pet) names[pet.kind] = pet.name;
-  return { pet: currentPet(), playing, names };
+  const pet = currentPet();
+  return { pet, playing, names, preferences: home.preferences, quietHoursActive: quietNow(), weather,
+    routines: home.routines, routine: routineState, companion: pet ? companionDetails(pet) : null };
 }
 let alertFile: string | undefined;
 let nextAlertLookup = 0;
@@ -87,12 +183,9 @@ function pollWindowsAlerts() {
     if (typeof data.id !== 'string' || typeof data.source !== 'string' ||
         typeof data.created !== 'number' || !Number.isFinite(data.created) || data.id === lastAlert) return;
     lastAlert = data.id;
-    if (data.created < startedAt || data.created < now - 15000 || home.quiet || !currentPet() || !win.isVisible()) return;
-    win.webContents.send('pet-alert', {
-      source: data.source.slice(0, 80),
-      message: typeof data.message === 'string' ? data.message.slice(0, 220) : '',
-      count: typeof data.count === 'number' && Number.isFinite(data.count) ? Math.max(1, Math.min(3, Math.floor(data.count))) : 1,
-    });
+    if (data.created < startedAt || data.created < now - 15000) return;
+    sendPetAlert(data.source.slice(0, 80), typeof data.message === 'string' ? data.message.slice(0, 220) : '',
+      typeof data.count === 'number' && Number.isFinite(data.count) ? Math.max(1, Math.min(3, Math.floor(data.count))) : 1);
   } catch { /* The companion may be offline or replacing its feed. */ }
 }
 
@@ -101,6 +194,7 @@ let ignoreMouse = true;
 let playing = false;
 let roamTimer: ReturnType<typeof setInterval> | undefined;
 let roamOrigin: Electron.Point | undefined;
+let dragOffset: Electron.Point | undefined;
 
 function stopRoam(restore = true) {
   if (roamTimer) clearInterval(roamTimer);
@@ -112,7 +206,10 @@ function stopRoam(restore = true) {
 
 function startRoam() {
   const pet = currentPet();
-  if (toyHome || roamTimer || home.quiet || !win.isVisible() || !ignoreMouse || !pet || pet.nap) return null;
+  const routine = routineAt(home.routines).active;
+  if (toyHome || dragOffset || roamTimer || home.quiet || home.preferences.locked ||
+      (home.preferences.roamFrequency === 'off' && routine?.activity !== 'roam') || (routine && routine.activity !== 'roam') ||
+      quietNow() || !win.isVisible() || !ignoreMouse || !pet || pet.nap) return null;
   const bounds = win.getBounds();
   const area = screen.getDisplayMatching(bounds).workArea;
   const floating = pet.kind === 'ghost' || pet.kind === 'cloud';
@@ -131,6 +228,7 @@ function startRoam() {
   const start = Date.now();
   roamOrigin = { x: bounds.x, y: bounds.y };
   roamTimer = setInterval(() => {
+    if (quietNow()) { stopRoam(); return; }
     const progress = Math.min(1, (Date.now() - start) / duration);
     const ease = (1 - Math.cos(progress * 2 * Math.PI)) / 2;
     win.setPosition(Math.round(bounds.x + (x - bounds.x) * ease), Math.round(bounds.y + (y - bounds.y) * ease));
@@ -189,8 +287,44 @@ function toggleQuiet() {
   updateTray();
   save();
 }
+function returnToScreen() {
+  stopRoam(false);
+  dragOffset = undefined;
+  closeToyStage();
+  const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const width = Math.min(360, area.width), height = Math.min(580, area.height);
+  const x = Math.round(area.x + Math.max(0, area.width - width - 12));
+  const y = Math.round(area.y + Math.max(0, area.height - height - 12));
+  win.setBounds({ x, y, width, height });
+  home.position = { x, y };
+  home.quiet = false;
+  win.showInactive();
+  updateTray();
+  save();
+}
+function changePreferences(input: unknown) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid preferences');
+  const previous = home.preferences;
+  home.preferences = normalizePreferences({ ...previous, ...input });
+  try { save(); } catch (error) { home.preferences = previous; throw error; }
+  stopRoam(false);
+  if (home.preferences.locked) dragOffset = undefined;
+  updateTray();
+  void updateWeather();
+  return status();
+}
 function updateTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open controls', click: () => { home.quiet = false; win.showInactive(); win.webContents.send('open-controls'); updateTray(); save(); } },
+    { label: 'Return pet to screen', click: returnToScreen },
+    { label: 'Lock position', type: 'checkbox', checked: home.preferences.locked, click: () => changePreferences({ locked: !home.preferences.locked }) },
+    { label: 'Roaming', submenu: ['off', 'rarely', 'normal', 'often'].map(value => ({
+      label: value[0].toUpperCase() + value.slice(1), type: 'radio' as const,
+      checked: home.preferences.roamFrequency === value, click: () => changePreferences({ roamFrequency: value }),
+    })) },
+    { label: 'Feed pet', enabled: Boolean(currentPet()), click: () => { const pet = currentPet(); if (pet) { const reaction = act(pet, 'feed', Date.now()); save(); win.webContents.send('care-feedback', reaction); } } },
+    { label: 'Sleep / wake', enabled: Boolean(currentPet()), click: () => { const pet = currentPet(); if (pet) { act(pet, pet.nap ? 'wake' : 'sleep', Date.now()); save(); } } },
+    { type: 'separator' },
     { label: 'Quiet Mode', type: 'checkbox', checked: home.quiet, click: toggleQuiet },
     { label: 'Quit Anino', click: () => app.quit() },
   ]));
@@ -212,6 +346,13 @@ else app.whenReady().then(() => {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(error);
   }
+  home.preferences = normalizePreferences(home.preferences);
+  home.routines = restoreRoutines(home.routines);
+  if (!home.routineRuns || typeof home.routineRuns !== 'object' || Array.isArray(home.routineRuns)) home.routineRuns = {};
+  if (home.position && (!Number.isSafeInteger(home.position.x) || !Number.isSafeInteger(home.position.y))) home.position = null;
+  home.weatherLocation = normalizeLocation(home.weatherLocation);
+  if (!home.weatherLastAlert || typeof home.weatherLastAlert.key !== 'string' || !Number.isFinite(home.weatherLastAlert.time)) home.weatherLastAlert = { key: '', time: 0 };
+  weather.location = home.weatherLocation;
   updatePets();
   const area = screen.getDisplayNearestPoint(home.position ?? screen.getCursorScreenPoint()).workArea;
   const width = 360, height = Math.min(580, area.height);
@@ -225,7 +366,7 @@ else app.whenReady().then(() => {
   win.setIgnoreMouseEvents(true, { forward: true });
   // Polling also restores click-through if the cursor leaves the window abruptly.
   const hitTest = setInterval(() => {
-    if (!win.isVisible()) return;
+    if (!win.isVisible() || dragOffset) return;
     const point = screen.getCursorScreenPoint();
     const bounds = win.getBounds();
     if (point.x < bounds.x || point.x >= bounds.x + bounds.width ||
@@ -246,9 +387,27 @@ else app.whenReady().then(() => {
     ignoreMouse = !interactive;
     win.setIgnoreMouseEvents(ignoreMouse, { forward: true });
   });
-  ipcMain.on('drag', (_event, x: number, y: number) => {
-    stopRoam(false);
-    if (!toyHome && Number.isSafeInteger(x) && Number.isSafeInteger(y)) win.setPosition(x, y);
+  ipcMain.on('drag', (_event, phase: 'start' | 'move' | 'end') => {
+    if (phase === 'end') {
+      const wasDragging = Boolean(dragOffset);
+      dragOffset = undefined;
+      if (wasDragging) {
+        const { x, y } = win.getBounds();
+        home.position = { x, y };
+        try { save(); } catch (error) { console.error('Could not save pet position:', error); }
+      }
+      return;
+    }
+    if (toyHome || home.preferences.locked) return;
+    // Keep cursor and window positions in Electron's display coordinate system.
+    const point = screen.getCursorScreenPoint();
+    if (phase === 'start') {
+      stopRoam(false);
+      const bounds = win.getBounds();
+      dragOffset = { x: point.x - bounds.x, y: point.y - bounds.y };
+    } else if (phase === 'move' && dragOffset) {
+      win.setPosition(point.x - dragOffset.x, point.y - dragOffset.y);
+    }
   });
   win.on('moved', () => {
     if (toyHome || roamOrigin) return;
@@ -294,6 +453,46 @@ else app.whenReady().then(() => {
   ipcMain.handle('command', (_event, input: string) => command(input));
   ipcMain.handle('setup-notifications', launchNotificationSetup);
   ipcMain.handle('status', status);
+  ipcMain.handle('preferences', (_event, input: unknown) => changePreferences(input));
+  ipcMain.handle('routines', (_event, input: unknown) => {
+    const previous = home.routines;
+    home.routines = validateRoutines(input);
+    try { save(); } catch (error) { home.routines = previous; throw error; }
+    const ids = new Set(home.routines.map(routine => routine.id));
+    home.routineRuns = Object.fromEntries(Object.entries(home.routineRuns).filter(([key]) => ids.has(key.split(':')[0])));
+    return status();
+  });
+  ipcMain.handle('customize-pet', (_event, input: unknown) => {
+    const pet = currentPet();
+    if (!pet || !input || typeof input !== 'object') throw new Error('Choose a pet and customization first.');
+    const value = input as { personality: unknown; accessory: unknown };
+    const previous = { personality: pet.personality, accessory: pet.accessory };
+    customizePet(pet, value.personality, value.accessory);
+    try { save(); } catch (error) { Object.assign(pet, previous); throw error; }
+    return status();
+  });
+  ipcMain.handle('return-to-screen', returnToScreen);
+  ipcMain.handle('weather-search', (_event, query: unknown) => {
+    if (typeof query !== 'string') throw new Error('Enter a city name');
+    return searchLocations(query);
+  });
+  ipcMain.handle('weather-provider', () => shell.openExternal('https://open-meteo.com/'));
+  async function setWeatherLocation(input: unknown) {
+    const location = input === null ? null : normalizeLocation(input);
+    if (input !== null && !location) throw new Error('Invalid weather location');
+    const previous = home.weatherLocation;
+    home.weatherLocation = location;
+    try { save(); } catch (error) { home.weatherLocation = previous; throw error; }
+    weather = { location, report: null, error: '', loading: false };
+    nextWeatherCheck = 0;
+    await weatherRequest;
+    lastWeatherAttempt = 0;
+    await updateWeather(true);
+    return status();
+  }
+  ipcMain.handle('weather-location', (_event, input: unknown) => setWeatherLocation(input));
+  ipcMain.handle('weather-detect', async () => setWeatherLocation(await detectLocation()));
+  ipcMain.handle('weather-refresh', async () => { await updateWeather(true); return status(); });
   ipcMain.handle('select-pet', (_event, kind: unknown, input: unknown) => {
     if (!isSpecies(kind) || typeof input !== 'string') throw new Error('Invalid pet selection');
     const name = input.trim();
@@ -304,6 +503,7 @@ else app.whenReady().then(() => {
     home.active = kind;
     const snapshot = status();
     save();
+    updateTray();
     return snapshot;
   });
   ipcMain.handle('act', (_event, action: string) => {
@@ -323,11 +523,16 @@ else app.whenReady().then(() => {
   });
   void win.loadFile(join(root, 'index.html'));
   const alerts = setInterval(pollWindowsAlerts, 1000);
+  const weatherTimer = setInterval(() => { void updateWeather(); }, 60000);
+  const routinesTimer = setInterval(updatePets, 15000);
+  void updateWeather();
   const autosave = setInterval(() => { updatePets(); save(); }, 30000);
   app.on('before-quit', () => {
     stopRoam();
     media.kill();
     clearInterval(alerts);
+    clearInterval(weatherTimer);
+    clearInterval(routinesTimer);
     clearInterval(autosave);
     clearInterval(hitTest);
     updatePets();

@@ -5,6 +5,8 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
 <title>Anino</title>
 <link rel="stylesheet" href="style.css">
+<script defer src="art/attachments.js"></script>
+<script defer src="dist/attachments.js"></script>
 <script defer src="dist/renderer.js"></script>
 </head>
 <body>
@@ -37,6 +39,7 @@
         <h1 id="pet-name">Pet</h1>
         <span id="pet-need" hidden></span>
         <span id="playing" hidden>♫ Now playing</span>
+        <span id="weather-reaction" hidden></span>
       </div>
       <button id="pick-pet" type="button" title="Switch or rename pet" aria-label="Switch or rename pet">Pets <span aria-hidden="true">&#8644;</span></button>
     </div>
@@ -45,6 +48,7 @@
       <button type="button" data-page="desk" aria-pressed="false">Desk</button>
       <button type="button" data-page="alerts" aria-pressed="false">Alerts</button>
       <button type="button" data-page="journal" aria-pressed="false">Journal</button>
+      <button type="button" data-page="settings" aria-pressed="false">Settings</button>
     </nav>
     <section id="page-care" aria-label="Care">
       <div id="stats">
@@ -72,11 +76,75 @@
       </div>
     </section>
     <section id="page-alerts" aria-label="Recent alerts" hidden>
+      <div class="weather-card">
+        <h2>Local weather</h2>
+        <p id="weather-location">Choose your location below.</p>
+        <p id="weather-report" aria-live="polite"></p>
+        <p id="weather-updated" class="settings-help"></p>
+        <p id="weather-error" role="status"></p>
+        <form id="weather-search"><label for="weather-city">City or postal code</label><div class="settings-row"><input id="weather-city" maxlength="100" minlength="2" required placeholder="City, country"><button type="submit">Search</button></div></form>
+        <div id="weather-results" aria-label="Matching locations"></div>
+        <div class="settings-row"><button type="button" id="weather-detect">Use approximate location</button><button type="button" id="weather-refresh">Refresh</button></div>
+        <button type="button" id="weather-clear" hidden>Clear location</button>
+        <p class="settings-help">Approximate lookup uses your public IP with ipwho.is. Your selected coordinates are sent to Open-Meteo for forecasts. Location is saved on this device.</p>
+        <p class="settings-help">Forecast checks every 30 minutes. Advisories cover the next 3 hours. Weather data by <a href="https://open-meteo.com/" id="weather-provider">Open-Meteo</a>.</p>
+      </div>
       <div class="inbox-header"><h2>Recent alerts</h2><button type="button" id="clear-alerts" hidden>Clear history</button></div>
       <p id="alerts-empty">No saved alerts yet.</p>
       <ul id="alerts-list"></ul>
     </section>
+    <section id="page-settings" aria-label="Preferences" hidden>
+      <form id="preferences">
+        <fieldset><legend>Movement and appearance</legend>
+          <label class="check"><input type="checkbox" name="locked">Lock pet position</label>
+          <label>Roaming <select name="roamFrequency"><option value="off">Off</option><option value="rarely">Rarely</option><option value="normal">Normal</option><option value="often">Often</option></select></label>
+          <label>Pet size <select name="size"><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
+          <label class="check"><input type="checkbox" name="weatherReactions">React to local weather</label>
+        </fieldset>
+        <fieldset><legend>Quiet hours</legend>
+          <label class="check"><input type="checkbox" name="quietHours">Pause roaming and mute alert popups</label>
+          <div class="settings-row"><label>From <input type="time" name="quietStart" required></label><label>Until <input type="time" name="quietEnd" required></label></div>
+          <p class="settings-help">Uses this computer's local time. Matching start and end times disable the schedule.</p>
+          <p id="quiet-status" role="status"></p>
+        </fieldset>
+        <fieldset><legend>Alerts</legend>
+          <label class="check"><input type="checkbox" name="desktopAlerts">Receive desktop alerts</label>
+          <label class="check"><input type="checkbox" name="weatherAlerts">Receive weather advisories</label>
+          <label class="check"><input type="checkbox" name="alertPopups">Show alert bubbles</label>
+          <label class="check"><input type="checkbox" name="alertPreviews">Show message previews</label>
+        </fieldset>
+        <div class="settings-row"><button type="submit">Save settings</button><button type="button" id="return-to-screen">Return pet to screen</button></div>
+        <p id="settings-result" role="status"></p>
+      </form>
+      <section class="routine-card" aria-label="Behavior routines">
+        <h2>Behavior routines</h2>
+        <p id="routine-active" role="status"></p>
+        <p class="settings-help">Uses local time while the app is running. Overnight routines belong to the day they start. Overlaps prioritize Quiet, Sleep, Play, then Roam.</p>
+        <p class="settings-help">Quiet pauses roaming and mutes bubbles. Play starts a ball-play activity and a playful pose. Waking your pet manually overrides that sleep occurrence.</p>
+        <ul id="routines-list"></ul>
+        <form id="routine-editor">
+          <label for="routine-name">Routine name</label><input id="routine-name" maxlength="40" required placeholder="Evening wind-down">
+          <label for="routine-activity">Activity</label><select id="routine-activity"><option value="roam">Roam</option><option value="sleep">Sleep</option><option value="play">Play</option><option value="quiet">Quiet</option></select>
+          <div class="settings-row"><label>From <input id="routine-start" type="time" value="09:00" required></label><label>Until <input id="routine-end" type="time" value="10:00" required></label></div>
+          <fieldset class="routine-days"><legend>Weekdays</legend>
+            <label><input type="checkbox" name="day" value="1" checked>Mon</label><label><input type="checkbox" name="day" value="2" checked>Tue</label><label><input type="checkbox" name="day" value="3" checked>Wed</label><label><input type="checkbox" name="day" value="4" checked>Thu</label><label><input type="checkbox" name="day" value="5" checked>Fri</label><label><input type="checkbox" name="day" value="6" checked>Sat</label><label><input type="checkbox" name="day" value="0" checked>Sun</label>
+          </fieldset>
+          <div class="settings-row"><button type="submit" id="routine-save">Add routine</button><button type="button" id="routine-cancel" hidden>Cancel edit</button></div>
+        </form>
+        <p id="routine-result" role="status"></p>
+      </section>
+    </section>
     <section id="page-journal" aria-label="Journal and collection" hidden>
+      <section class="companion-card" aria-label="Personality and friendship">
+        <h2>Personality and friendship</h2>
+        <p id="friendship-tier"></p><p id="favorite-activity"></p><p id="pet-habit" class="settings-help"></p><p id="next-milestone" class="settings-help"></p>
+        <form id="companion-editor">
+          <label>Personality <select id="pet-personality"><option value="curious">Curious</option><option value="playful">Playful</option><option value="gentle">Gentle</option><option value="dreamy">Dreamy</option></select></label>
+          <label>Accessory <select id="pet-accessory"></select></label>
+          <button type="submit">Save companion</button>
+        </form>
+        <p id="companion-result" role="status"></p>
+      </section>
       <h2>Collection</h2><p id="items"></p>
       <h2>Adventure log</h2><ul id="journal"></ul>
     </section>
@@ -96,8 +164,8 @@
 <div id="toy-hint" hidden>Drag the ball and release <button type="button" id="cancel-toy" data-hit aria-label="Cancel throw">×</button></div>
 <button type="button" id="toy-ball" data-hit hidden aria-label="Drag and release to throw the ball"></button>
 <button id="pet" hidden data-hit aria-label="Anino. Click for controls or drag to move." aria-expanded="false">
-  <span class="sprite" aria-hidden="true"></span><span id="clip" hidden>+</span>
-  <span id="effect"></span>
+  <span class="pet-art" aria-hidden="true"><span class="weather-environment"></span><span class="weather-character"><span class="character-facing"><span class="sprite"></span><span id="clip" hidden>+</span><span id="accessory"></span><span id="effect"></span></span></span><span class="weather-prop"></span><span class="routine-ball"></span></span>
+  <span id="pet-feedback" role="status" hidden></span>
 </button>
 </body>
 </html>
