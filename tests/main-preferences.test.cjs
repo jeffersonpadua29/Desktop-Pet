@@ -68,13 +68,20 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
   const otherName = 'main #1.c';
   const otherFile = path.join(documents, otherName);
   const launches = [];
+  const saves = [];
   let rejectLaunch = false;
   const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json({
     message: { tool_calls: [{ function: { name: 'create_file', arguments: { name: file.name, content: 'int x;' } } }] },
   }));
   const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
     modules: {
-      './assistant': { ...assistant, saveGeneratedFile: async () => file },
+      './assistant': {
+        ...assistant,
+        saveGeneratedFile: async (destination, requested) => {
+          saves.push([destination, requested.name, requested.content]);
+          return { ...file, name: requested.name, folder: destination, path: path.join(destination, requested.name) };
+        },
+      },
       'node:fs': {
         existsSync: target => [documents, folder, file.path].includes(path.normalize(target)),
         readdirSync: target => [{ name: path.normalize(target) === documents ? otherName : file.name, isFile: () => true }],
@@ -101,6 +108,12 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
   assert.match(launches[1], /\/main%20%231\.c$/);
   rejectLaunch = true;
   assert.match((await ask('open sort.c in vscode')).message, /couldn’t send this file to VS Code/);
+  const downloaded = await ask('can you create a indexsort.c in my download folder');
+  assert.equal(downloaded.message, 'Created an empty file named “indexsort.c” in Downloads.');
+  assert.deepEqual(saves.map(([destination, name, content]) => [path.normalize(destination), name, content]), [
+    [folder, 'sort.c', 'int x;'],
+    [path.join(path.sep, 'virtual', 'downloads'), 'indexsort.c', ''],
+  ]);
   assert.equal(fetch.mock.callCount(), 1);
 });
 

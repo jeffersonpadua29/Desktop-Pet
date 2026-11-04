@@ -487,16 +487,20 @@ async function askPet(input: unknown, scope: unknown) {
       return reaction;
     }
     if (intent.type === 'create-file') {
+      const downloads = intent.destination === 'downloads';
+      const location = downloads ? 'Downloads' : 'Documents → Pet Pocket';
       try {
-        const { name, folder, path, modified, canOpen } = await saveGeneratedFile(app.getPath('documents'), intent.file);
+        const destination = downloads ? app.getPath('downloads') : join(app.getPath('documents'), 'Pet Pocket');
+        const { name, folder, path, modified, canOpen } = await saveGeneratedFile(destination, intent.file);
         assistantFiles = [{ name, folder, path, modified, canOpen }];
         fileConversation = { pet, files: assistantFiles };
-        return { message: 'Saved “' + name + '” in Documents → Pet Pocket.', files: [{ name, folder, modified, canOpen }] };
+        const action = intent.file.content === '' ? 'Created an empty file named' : 'Saved';
+        return { message: action + ' “' + name + '” in ' + location + '.', files: [{ name, folder, modified, canOpen }] };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-          return { message: 'A file with that name already exists in Documents → Pet Pocket. Ask me to use another filename.' };
+          return { message: 'A file with that name already exists in ' + location + '. Ask me to use another filename.' };
         }
-        return { message: 'Windows couldn’t save the file in Documents → Pet Pocket.' };
+        return { message: 'Windows couldn’t save the file in ' + location + '.' };
       }
     }
     if (intent.type === 'find') {

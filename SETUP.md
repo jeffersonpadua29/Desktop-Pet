@@ -41,7 +41,7 @@ If WinGet is unavailable or setup fails, the pet still opens. Install Ollama man
 npm run setup:ai
 ```
 
-Choose a pet and open **Ask**. Qwen handles chat and tool requests locally. Created files go to **Documents → Pet Pocket**. File search uses the selected Windows folders, and you can open a result in Explorer or the desktop version of VS Code. Chat history stays in the running app session.
+Choose a pet and open **Ask**. Qwen handles chat and tool requests locally. Created files go to **Documents → Pet Pocket** by default. Specify **Downloads** in your request to save there. A request to create a named source file without describing its contents makes an empty file immediately. File search uses the selected Windows folders, and you can open a result in Explorer or the desktop version of VS Code. Chat history stays in the running app session.
 
 ## Live notifications from a clone
 

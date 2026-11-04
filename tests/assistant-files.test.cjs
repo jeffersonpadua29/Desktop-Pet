@@ -27,10 +27,10 @@ test('creation uses the file tool and writes the returned content without overwr
     await rmdir(folder).catch(() => {});
     await rmdir(documents);
   });
-  const file = await saveGeneratedFile(documents, intent.file);
+  const file = await saveGeneratedFile(folder, intent.file);
   assert.equal(file.path, path);
   assert.equal(await readFile(path, 'utf8'), content);
-  await assert.rejects(saveGeneratedFile(documents, { ...intent.file, content: 'replacement' }), { code: 'EEXIST' });
+  await assert.rejects(saveGeneratedFile(folder, { ...intent.file, content: 'replacement' }), { code: 'EEXIST' });
   assert.equal(await readFile(path, 'utf8'), content);
 });
 
@@ -61,4 +61,23 @@ test('a C filename routes to file creation even without the word file', async t 
   const options = JSON.parse(fetch.mock.calls[0].arguments[1].body);
   assert.equal(options.tools[0].function.name, 'create_file');
   assert.match(options.messages[0].content, /omit code comments/);
+});
+
+test('creating a named empty file in Downloads does not require Ollama', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', async () => {
+    assert.fail('Blank file creation should not call Ollama');
+  });
+  assert.deepEqual(await ask('can you create a indexsort.c in my download folder'), {
+    type: 'create-file', file: { name: 'indexsort.c', content: '' }, destination: 'downloads',
+  });
+  assert.equal((await ask('create ../../indexsort.c in Downloads')).type, 'reply');
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('requested source contents still go to Qwen and retain the Downloads destination', async t => {
+  const content = 'int index_sort(void) { return 0; }\n';
+  const fetch = t.mock.method(globalThis, 'fetch', async () => toolReply('Downloads\\indexsort.c', content));
+  const intent = await ask('Create indexsort.c in Downloads with a C function that sorts an array of indices by their values.');
+  assert.deepEqual(intent, { type: 'create-file', file: { name: 'indexsort.c', content }, destination: 'downloads' });
+  assert.equal(fetch.mock.callCount(), 1);
 });

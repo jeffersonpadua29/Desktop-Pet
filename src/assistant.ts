@@ -30,7 +30,7 @@ function isLaunchTarget(value: unknown): value is LaunchTarget {
 export type Intent =
   | { type: 'reply'; message: string }
   | { type: 'find'; search: Search }
-  | { type: 'create-file'; file: GeneratedFile }
+  | { type: 'create-file'; file: GeneratedFile; destination?: 'downloads' }
   | { type: 'open-in-vscode'; name?: string; folder?: 'documents' }
   | { type: 'launch'; target: LaunchTarget }
   | { type: 'window'; action: 'list' }
@@ -177,8 +177,10 @@ function requestedTool(command: string) {
   return undefined;
 }
 
-function fileRequest(command: string) {
-  const request = command.replace(/^(?:in|inside)\s+(?:my\s+|the\s+)?documents?(?:\s+(?:files?\s+)?folder)?[,\s]+/i, '');
+const leadingFileLocation = /^(?:in|inside)\s+(?:my\s+|the\s+)?(documents?|downloads?)(?:\s+(?:files?\s+)?folder)?[,\s]+/i;
+const downloadsLocation = /\s+(?:in|inside|to)\s+(?:my\s+|the\s+)?downloads?(?:\s+folder)?(?=[.!?]*$|[,\s]+(?:with|containing)\b)/i;
+
+function fileRequest(request: string) {
   const action = /^(create|generate|make|write|save|export|draft|build|put)\s+([\s\S]+)/i.exec(request);
   if (!action) return false;
   const subject = action[2];
@@ -189,23 +191,25 @@ function fileRequest(command: string) {
     (/^(?:save|export)$/i.test(action[1]) && /^(?:it|this|that|the (?:answer|draft|reply|text))\b/i.test(subject));
 }
 
-function validateGeneratedFile(args: Record<string, unknown> | undefined, allowEmpty: boolean): GeneratedFile | undefined {
-  const { name, content } = args ?? {};
+function isGeneratedFilename(name: unknown): name is string {
   if (typeof name !== 'string' || !name || name.length > 100 ||
       /^[ .]|[ .]$|[<>:"/\\|?*\p{Cc}\p{Cf}]/u.test(name) ||
-      /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]) *(?:\.|$)/i.test(name)) return;
+      /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]) *(?:\.|$)/i.test(name)) return false;
   const extension = extname(name).slice(1).toLowerCase();
-  if (!fileFormats.some(format => format === extension) ||
-      typeof content !== 'string' || (!allowEmpty && !content.trim()) || content.includes('\0') ||
+  return fileFormats.some(format => format === extension);
+}
+
+function validateGeneratedFile(name: unknown, content: unknown, allowEmpty: boolean): GeneratedFile | undefined {
+  if (!isGeneratedFilename(name) || typeof content !== 'string' ||
+      (!allowEmpty && !content.trim()) || content.includes('\0') ||
       Buffer.byteLength(content, 'utf8') > 32_768) return;
-  if (extension === 'json') {
+  if (extname(name).toLowerCase() === '.json') {
     try { JSON.parse(content); } catch { return; }
   }
   return { name, content };
 }
 
-export async function saveGeneratedFile(documents: string, file: GeneratedFile): Promise<FileMatch> {
-  const folder = join(documents, 'Pet Pocket');
+export async function saveGeneratedFile(folder: string, file: GeneratedFile): Promise<FileMatch> {
   await mkdir(folder, { recursive: true });
   const path = join(folder, file.name);
   const output = await open(path, 'wx');
@@ -220,7 +224,7 @@ export async function saveGeneratedFile(documents: string, file: GeneratedFile):
   return { name: file.name, folder, path, modified: Date.now(), canOpen: /\.(?:txt|md|json)$/i.test(file.name) };
 }
 
-function assistantRules(pet: PetContext, scope: string, tool?: string) {
+function assistantRules(pet: PetContext, scope: string, tool?: string, filename?: string) {
   const profile = JSON.stringify({
     name: pet.name, fullness: Math.round(pet.food), energy: Math.round(pet.energy),
     bond: Math.round(pet.bond), asleep: pet.asleep,
@@ -236,7 +240,8 @@ function assistantRules(pet: PetContext, scope: string, tool?: string) {
     tool
       ? 'Use the supplied tool for the current requested action. Ask for missing arguments. Only the app reports action results.' +
         (tool === 'find_files' ? ' File search covers ' + scope + '.' : '') +
-        (tool === 'create_file' ? ' Generate the full contents and call create_file. Honor the requested filename, format, and content constraints, including requests to omit code comments. Use an appropriate filename if none is given. Reuse prior chat text if asked to save it. Ask what the file should contain if no topic or text is given. The app saves files in Documents → Pet Pocket, so pass a filename only.' : '')
+        (tool === 'create_file' ? ' Generate the full contents and call create_file. Honor the requested format and content constraints, including requests to omit code comments. Reuse prior chat text if asked to save it. Ask what the file should contain if no topic or text is given. The app handles the destination. ' +
+          (filename ? 'Use this exact filename as the name argument: ' + JSON.stringify(filename) + '.' : 'Choose an appropriate filename without a folder path.') : '')
       : 'Answer questions normally. Pet Pocket can create and find local files, open those files in VS Code, launch supported shortcuts, manage open windows, and open Spotify search. Track playback requires selection in Spotify. Describe only relevant capabilities and never claim an action ran on this turn.',
   ].join(' ');
 }
@@ -325,50 +330,71 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
   if (music) return music;
   const quick = quickIntent(command || latest, pet.name);
   if (quick) return quick;
-  const tool = fileRequest(command) ? 'create_file' : requestedTool(command);
+  const leadingLocation = leadingFileLocation.exec(command);
+  const fileCommand = command.replace(leadingFileLocation, '');
+  const tool = fileRequest(fileCommand) ? 'create_file' : requestedTool(command);
+  const inDownloads = /^download/i.test(leadingLocation?.[1] ?? '') || downloadsLocation.test(fileCommand);
+  const destination = inDownloads ? { destination: 'downloads' as const } : {};
   if (tool === 'create_file' && /\b(?:as\s+(?:(?:an?|the)\s+)?|^(?:create|generate|make|write|save|export|draft|build)\s+(?:(?:me|us)\s+)?(?:(?:an?|the)\s+)?)(?:pdf|docx|xlsx|pptx|word\s+document|excel\s+(?:file|spreadsheet|workbook))\b|\.(?:pdf|docx|xlsx|pptx)(?=["'”’\s.!?]|$)/i.test(command)) {
     return { type: 'reply', message: 'That file format isn’t available in Ask Pet yet. I can save ' + fileFormatList + ' files.' };
+  }
+  let filename: string | undefined;
+  if (tool === 'create_file') {
+    const request = fileCommand.replace(downloadsLocation, '');
+    const named = /^(create|make|generate|write|save|export|draft|build|put)\s+(?:me\s+)?(?:an?\s+)?(?:(?:new|blank|empty)\s+)?(?:file\s+(?:named|called)\s+)?(?:"([^"]+)"|“([^”]+)”|`([^`]+)`|([^\s]+?\.[a-z0-9]+))(?:[\s,]+((?:with|containing|that|for|using|implementing|and)\b[\s\S]*))?[.!?]*$/i.exec(request);
+    if (named) {
+      const name = named[2] ?? named[3] ?? named[4] ?? named[5];
+      if (!isGeneratedFilename(name)) return { type: 'reply', message: 'Use a filename with a supported extension and no folder path.' };
+      filename = name;
+      if (!named[6] && /^(?:create|make)$/i.test(named[1])) {
+        const content = extname(name).toLowerCase() === '.json' ? '{}\n' : '';
+        return { type: 'create-file', file: { name, content }, ...destination };
+      }
+    }
   }
   const draft = tool ? undefined : onDraft;
   const history = turns.slice(-7, -1).map(turn => ({
     role: turn.role, content: turn.content.slice(0, tool === 'create_file' ? 1600 : 600),
   }));
-  let response: Response;
+  const signal = AbortSignal.timeout(tool === 'create_file' ? 180_000 : 90_000);
+  let message: OllamaMessage;
   try {
-    response = await fetch(localChat, {
+    const response = await fetch(localChat, {
       method: 'POST',
       redirect: 'error',
       headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(90000),
+      signal,
       body: JSON.stringify({
         model, stream: Boolean(draft), think: false, keep_alive: '15m',
         ...(tool ? { tools: tools.filter(entry => entry.function.name === tool) } : {}),
         options: { num_ctx: tool === 'create_file' ? 6144 : 3072, num_predict: tool === 'create_file' ? 2048 : tool ? 120 : 240, temperature: tool ? 0 : .25 },
         messages: [{
           role: 'system',
-          content: assistantRules(pet, scope, tool),
+          content: assistantRules(pet, scope, tool, filename),
         }, ...history, { role: 'user', content: latest }],
       }),
     });
+    if (!response.ok) return {
+      type: 'reply',
+      message: response.status === 404
+        ? 'The local model is missing. Run npm run setup:ai and try again.'
+        : 'Ollama could not answer this request. Try again in a moment.',
+    };
+    message = await readModelReply(response, draft);
   } catch (error) {
-    if (error instanceof Error && error.name === 'TimeoutError') {
-      return { type: 'reply', message: 'The local model took too long. Try a shorter request.' };
+    if (signal.aborted || (error instanceof Error && error.name === 'TimeoutError')) {
+      return { type: 'reply', message: tool === 'create_file'
+        ? 'The local model timed out while writing the contents. No file was saved.'
+        : 'The local model took too long. Try a shorter request.' };
     }
     return { type: 'reply', message: 'I could not reach Ollama on this PC. Run npm run setup:ai and try again.' };
   }
-  if (!response.ok) return {
-    type: 'reply',
-    message: response.status === 404
-      ? 'The local model is missing. Run npm run setup:ai and try again.'
-      : 'Ollama could not answer this request. Try again in a moment.',
-  };
-  const message = await readModelReply(response, draft);
   const call = message.tool_calls?.[0]?.function;
   if (call && call.name !== tool) return { type: 'reply', message: 'No action was run. Please ask directly if you want me to use a tool.' };
   const args = call?.arguments;
   if (call?.name === 'create_file') {
-    const file = validateGeneratedFile(args, /\b(?:empty|blank)\b/i.test(command));
-    return file ? { type: 'create-file', file } : { type: 'reply', message: 'I couldn’t generate a valid file. Try a supported extension or a shorter request.' };
+    const file = validateGeneratedFile(filename ?? args?.name, args?.content, /\b(?:empty|blank)\b/i.test(command));
+    return file ? { type: 'create-file', file, ...destination } : { type: 'reply', message: 'Qwen didn’t return valid file contents. No file was saved.' };
   }
   if (call?.name === 'find_files' && args) {
     const name = typeof args.name === 'string' ? args.name.trim().slice(0, 120) : '';
