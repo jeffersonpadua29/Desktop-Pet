@@ -1,4 +1,4 @@
-# Anino
+# Desktop Pet
 
 A tiny shadow gremlin for your Windows desktop.
 
