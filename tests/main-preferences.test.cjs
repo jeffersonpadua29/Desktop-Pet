@@ -11,6 +11,7 @@ async function start(saved, weatherOverrides = {}, overrides = {}) {
   let windowsAlert;
   let window, menu;
   const area = {x:0,y:0,width:1200,height:800};
+  const cursor = {x:1000,y:700};
   class Window {
     constructor(options) {
       window = this;
@@ -35,7 +36,7 @@ async function start(saved, weatherOverrides = {}, overrides = {}) {
   const electron = {
     app: {setName:()=>{},requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),getPath:name=>overrides.paths?.[name] ?? '/virtual/'+name,on:(name,fn)=>{events[name]=fn;},quit:()=>{}},
     BrowserWindow:Window, ipcMain:{handle:(name,fn)=>{ipc[name]=fn;},on:(name,fn)=>{ipc[name]=fn;}},
-    screen:{getCursorScreenPoint:()=>({x:1000,y:700}),getDisplayNearestPoint:()=>({workArea:area}),getDisplayMatching:()=>({workArea:area})},
+    screen:{getCursorScreenPoint:()=>({...cursor}),getDisplayNearestPoint:()=>({workArea:area}),getDisplayMatching:()=>({workArea:area})},
     Tray:class {setToolTip(){} on(){} setContextMenu(value){menu=value;}},
     Menu:{buildFromTemplate:items=>items},nativeImage:{createFromPath:()=>null},dialog:{},shell:{},
   };
@@ -55,7 +56,7 @@ async function start(saved, weatherOverrides = {}, overrides = {}) {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../dist/main.js'),'utf8'),context);
   await new Promise(resolve=>setImmediate(resolve));
-  return {call:(name,...args)=>ipc[name]({},...args),window,files,alerts,menu:()=>menu,area,location,
+  return {call:(name,...args)=>ipc[name]({},...args),window,files,alerts,menu:()=>menu,area,location,cursor,
     tickReminders:()=>intervals.find(fn=>fn.name==='checkTodoReminders')(),
     desktopAlert:input=>{windowsAlert=input;intervals.find(fn=>fn.name==='pollWindowsAlerts')();}};
 }
@@ -87,7 +88,7 @@ test('Settings encrypts the selected provider key and cloud failure falls back i
       return new Response('', { status: 401 });
     }
     assert.equal(url, 'http://127.0.0.1:11434/api/chat');
-    return Response.json({ message: { content: 'Local fallback answer.' } });
+    return Response.json({ message: { content: 'Local fallback answer.' }, done: true });
   });
   const input = { enabled: true, provider: 'openai', model: 'gpt-4.1-mini', key };
   assert.equal(app.call('ai-settings').enabled, false);
@@ -197,6 +198,61 @@ test('Ask Pet renames a file across turns in either order and preserves occupied
   assert.equal(fetch.mock.callCount(), 0);
 });
 
+test('Ask Pet applies extension-only renames without keeping or appending the old extension', { skip: process.platform !== 'win32' }, async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-extension-'));
+  const python = path.join(folder, 'script.py'), c = path.join(folder, 'script.c'), named = path.join(folder, 'ready.c');
+  const occupied = path.join(folder, 'ready.py');
+  fs.writeFileSync(python, 'original contents'); fs.writeFileSync(occupied, 'occupied');
+  t.after(() => { for (const file of [python, c, named, occupied]) if (fs.existsSync(file)) fs.unlinkSync(file); fs.rmdirSync(folder); });
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { downloads: folder },
+    modules: { 'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync } },
+  });
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('Extension renaming does not need inference.'));
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  await ask('Read script.py in Downloads');
+  const renamed = await ask('Change the extension to c');
+  assert.equal(renamed.files[0].name, 'script.c');
+  assert.equal(fs.existsSync(python), false);
+  assert.equal(fs.readFileSync(c, 'utf8'), 'original contents');
+  assert.match((await ask('Change the filename to ready.c')).message, /Renamed/);
+  assert.match((await ask('Rename it to .py')).message, /already exists/);
+  assert.equal(fs.readFileSync(occupied, 'utf8'), 'occupied');
+  assert.equal(fs.readFileSync(named, 'utf8'), 'original contents');
+});
+
+test('Ask Pet converts a selected Python file to C and follows the new C file afterward', async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-language-'));
+  const python = path.join(folder, 'hello.py'), c = path.join(folder, 'hello.c');
+  const original = 'print("Hello")\n', converted = '#include <stdio.h>\nint main(void) { puts("Hello"); return 0; }\n';
+  fs.writeFileSync(python, original);
+  t.after(() => { for (const file of [python, c]) if (fs.existsSync(file)) fs.unlinkSync(file); fs.rmdirSync(folder); });
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { downloads: folder },
+    modules: { 'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync } },
+  });
+  const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.match(url, /^http:\/\/127\.0\.0\.1/);
+    const body = JSON.parse(options.body), prompt = JSON.parse(body.messages.at(-1).content);
+    assert.equal(prompt.filename, 'hello.py'); assert.equal(prompt.outputFilename, 'hello.c');
+    return Response.json({ message: { tool_calls: [{ function: { name: 'propose_source', arguments: { content: converted } } }] } });
+  });
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  await ask('Read hello.py in Downloads');
+  const preview = await ask('Use C instead of Python');
+  assert.equal(preview.proposal.path, c);
+  assert.equal(preview.proposal.sourcePath, python);
+  assert.equal(fs.existsSync(c), false);
+  const applied = await ask('Apply it');
+  assert.equal(applied.files[0].name, 'hello.c');
+  assert.equal(fs.readFileSync(c, 'utf8'), converted);
+  assert.equal(fs.readFileSync(python, 'utf8'), original);
+  assert.match((await ask('Read it')).message, /#include <stdio.h>/);
+  const conflict = await ask('Convert hello.py in Downloads to C');
+  assert.match(conflict.message, /already exists/);
+  assert.equal(fetch.mock.callCount(), 1);
+});
+
 test('Ask Pet controls only Spotify and reports the verified playback result', async t => {
   const playback = [];
   const opened = [];
@@ -264,6 +320,7 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
   }));
   const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
     modules: {
+      './file-agent': { ...require('../dist/file-agent'), inspectFile: async path => ({ path }) },
       './assistant': {
         ...assistant,
         findFiles: async roots => {
@@ -311,6 +368,175 @@ test('Ask Pet opens its last generated file in VS Code and keeps the file card a
     [downloads, 'indexsort.c', ''],
   ]);
   assert.equal(fetch.mock.callCount(), 1);
+});
+
+test('Ask Pet creates, reads, reviews, opens, patches and recycles one grounded file across turns', async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-agent-'));
+  const generated = path.join(folder, 'Pet Pocket');
+  const target = path.join(generated, 'counter.js');
+  const recycled = path.join(folder, 'recycled.js');
+  t.after(() => {
+    for (const file of [target, recycled]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    if (fs.existsSync(generated)) fs.rmdirSync(generated);
+    fs.rmdirSync(folder);
+  });
+  const opened = [], trashed = [];
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { documents: folder, downloads: folder, desktop: folder },
+    modules: {
+      'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync },
+      electron: { shell: {
+        openExternal: async url => opened.push(url),
+        trashItem: async filename => { trashed.push(filename); fs.renameSync(filename, recycled); },
+      } },
+    },
+  });
+  const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.match(url, /^http:\/\/127\.0\.0\.1/);
+    const body = JSON.parse(options.body);
+    if (body.tools?.[0].function.name === 'create_file') return Response.json({ message: { tool_calls: [{ function: {
+      name: 'create_file', arguments: { name: 'counter.js', content: 'export const count = 1;\n' },
+    } }] } });
+    const prompt = JSON.parse(body.messages.at(-1).content);
+    assert.equal(prompt.source, 'export const count = 1;\n');
+    if (body.tools) return Response.json({ message: { tool_calls: [{ function: {
+      name: 'propose_patch', arguments: { replacements: [{ oldText: 'count = 1', newText: 'count = 2' }] },
+    } }] } });
+    assert.equal(body.tools, undefined);
+    return Response.json({ message: { content: 'This file exports count with the value 1.' } });
+  });
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  assert.match((await ask('Create counter.js with an exported count')).message, /Saved/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'export const count = 1;\n');
+  assert.match((await ask('Read it')).message, /export const count = 1/);
+  assert.match((await ask('What does it do?')).message, /exports count/);
+  assert.match((await ask('Open it')).message, /VS Code/);
+  assert.equal(opened.length, 1);
+  const preview = await ask('Change that file so count is 2');
+  assert.equal(preview.proposal.after, 'export const count = 2;\n');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'export const count = 1;\n');
+  assert.match((await ask('Apply it')).message, /Updated/);
+  assert.match((await ask('Read it')).message, /count = 2/);
+  assert.match((await ask('Delete it')).message, /Recycle Bin/);
+  assert.deepEqual(trashed, [target]);
+  assert.equal(fs.existsSync(target), false);
+  assert.equal(fs.readFileSync(recycled, 'utf8'), 'export const count = 2;\n');
+  assert.match((await ask('Delete it')).message, /Which file/);
+  assert.equal(fetch.mock.callCount(), 3);
+});
+
+test('file operations reject duplicate or unknown targets and preserve files when recycling fails', async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-targets-'));
+  const documents = path.join(folder, 'documents'), downloads = path.join(folder, 'downloads');
+  fs.mkdirSync(documents); fs.mkdirSync(downloads);
+  const first = path.join(documents, 'notes.txt'), second = path.join(downloads, 'notes.txt');
+  fs.writeFileSync(first, 'first'); fs.writeFileSync(second, 'second');
+  t.after(() => { fs.unlinkSync(first); fs.unlinkSync(second); fs.rmdirSync(documents); fs.rmdirSync(downloads); fs.rmdirSync(folder); });
+  let attempted = 0;
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { documents, downloads, desktop: folder },
+    modules: {
+      'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync },
+      electron: { shell: { showItemInFolder: () => {}, trashItem: async () => { attempted++; throw new Error('Busy file'); } } },
+    },
+  });
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('These operations do not need a model.'));
+  const ask = content => app.call('ask-pet', [{ role: 'user', content }], 'all');
+  assert.match((await ask('Delete notes.txt')).message, /multiple files/);
+  assert.match((await ask('Open notes.txt in VS Code')).message, /multiple files/);
+  assert.match((await ask('Read notes.txt in Documents')).message, /first/);
+  assert.match((await ask('Delete missing.txt')).message, /couldn’t find/);
+  assert.equal(attempted, 0);
+  assert.match((await ask('Delete it')).message, /No deletion was confirmed/);
+  assert.equal(attempted, 1);
+  assert.match((await ask('Read it')).message, /first/);
+  assert.equal(fs.readFileSync(first, 'utf8'), 'first');
+  // A selected result disambiguates the same filename in later requests.
+  const found = await app.call('ask-pet', [{ role: 'user', content: 'Find notes.txt' }], 'all');
+  const selection = found.files.findIndex(file => file.folder === downloads);
+  assert.ok(selection >= 0);
+  assert.equal(await app.call('assistant-file', selection, 'reveal'), '');
+  assert.match((await ask('Read notes.txt')).message, /second/);
+});
+
+test('saving a long file-read response preserves the whole response across the IPC boundary', async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-long-read-'));
+  const target = path.join(folder, 'notes.txt');
+  const generated = path.join(folder, 'Pet Pocket');
+  const copy = path.join(generated, 'copy.txt');
+  fs.writeFileSync(target, 'Source paragraph.\n'.repeat(1000));
+  t.after(() => { fs.unlinkSync(target); if (fs.existsSync(copy)) fs.unlinkSync(copy); if (fs.existsSync(generated)) fs.rmdirSync(generated); fs.rmdirSync(folder); });
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { documents: folder },
+    modules: { 'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync } },
+  });
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('Reading and saving text do not need inference.'));
+  const read = await app.call('ask-pet', [{ role: 'user', content: 'Read notes.txt in Documents' }], 'all');
+  assert.ok(read.message.length > 1600);
+  const save = await app.call('ask-pet', [
+    { role: 'assistant', content: read.message }, { role: 'user', content: 'Save the previous answer as copy.txt' },
+  ], 'all');
+  assert.match(save.message, /Saved/);
+  assert.equal(fs.readFileSync(copy, 'utf8'), read.message);
+});
+
+test('file analysis is rejected when the file changes during generation', async t => {
+  const folder = fs.mkdtempSync(path.join(__dirname, '..', '.pet-pocket-snapshot-'));
+  const target = path.join(folder, 'notes.txt');
+  fs.writeFileSync(target, 'Original');
+  t.after(() => { fs.unlinkSync(target); fs.rmdirSync(folder); });
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' }, {}, {
+    paths: { documents: folder },
+    modules: { 'node:fs': { readdirSync: fs.readdirSync, statSync: fs.statSync, existsSync: fs.existsSync } },
+  });
+  t.mock.method(globalThis, 'fetch', async () => {
+    fs.writeFileSync(target, 'Changed during review');
+    return Response.json({ message: { content: 'An outdated analysis.' } });
+  });
+  const result = await app.call('ask-pet', [{ role: 'user', content: 'Review notes.txt in Documents' }], 'all');
+  assert.doesNotMatch(result.message, /outdated analysis/);
+  assert.match(result.message, /file changed/);
+});
+
+test('menu resizing stretches both axes, preserves the pet anchor and survives restart', async () => {
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' });
+  const original = app.window.getBounds();
+  app.call('resize-panel', { phase: 'start', axis: 'both', width: 334, height: 426 });
+  app.cursor.x -= 100; app.cursor.y -= 100;
+  const expanded = app.call('resize-panel', { phase: 'move' });
+  assert.equal(expanded.width, 434); assert.equal(expanded.height, 526);
+  const bounds = app.window.getBounds();
+  assert.equal(bounds.x + bounds.width, original.x + original.width);
+  assert.equal(bounds.y + bounds.height, original.y + original.height);
+  app.call('resize-panel', { phase: 'end' });
+  const saved = JSON.parse(app.files[path.join('/virtual/userData', 'pet.json')]);
+  assert.equal(saved.preferences.panelWidth, 434);
+  assert.equal(saved.preferences.panelHeight, 526);
+  const restarted = await start(saved);
+  assert.equal(restarted.window.getBounds().width, 460);
+  assert.equal(restarted.window.getBounds().height, 680);
+  assert.equal(restarted.window.getBounds().x + 460, original.x + original.width);
+});
+
+test('menu stretch supports individual axes, cancellation, screen limits and reset', async () => {
+  const app = await start({ pets: { cat: fresh(Date.now(), 'cat', 'Mochi') }, active: 'cat' });
+  const original = app.window.getBounds();
+  app.call('resize-panel', { phase: 'start', axis: 'width', width: 334, height: 426 });
+  app.cursor.x -= 80; app.cursor.y -= 80;
+  const stretched = app.call('resize-panel', { phase: 'move' });
+  assert.equal(stretched.width, 414); assert.equal(stretched.height, 426);
+  app.call('resize-panel', { phase: 'cancel' });
+  assert.deepEqual(app.window.getBounds(), original);
+  assert.equal(app.call('status').preferences.panelWidth, 334);
+  const max = app.call('resize-panel', { phase: 'set', width: 10000, height: 10000 });
+  assert.equal(max.width, 960);
+  assert.ok(app.window.getBounds().height <= app.area.height);
+  assert.ok(app.window.getBounds().x >= app.area.x && app.window.getBounds().y >= app.area.y);
+  const beforeInvalid = app.window.getBounds();
+  app.call('resize-panel', { phase: 'set', width: NaN, height: Infinity });
+  assert.deepEqual(app.window.getBounds(), beforeInvalid);
+  const reset = app.call('resize-panel', { phase: 'reset' });
+  assert.equal(reset.width, 334); assert.equal(reset.height, 426);
 });
 
 test('preferences and drag position persist through restart, with native position lock', async () => {
@@ -395,9 +621,11 @@ test('switching location while a forecast is pending ignores the earlier respons
 });
 
 function currentRoutine(activity) {
-  const hour = new Date().getHours();
-  const time = value => String((value+24)%24).padStart(2,'0')+':00';
-  return {id:'daily',name:'Daily routine',activity,days:[0,1,2,3,4,5,6],start:time(hour-1),end:time(hour+1),enabled:true};
+  const now = new Date();
+  const minute = now.getHours() * 60 + now.getMinutes();
+  const time = value => { const wrapped = (value + 1440) % 1440; return String(Math.floor(wrapped / 60)).padStart(2, '0') + ':' + String(wrapped % 60).padStart(2, '0'); };
+  // Keep a full hour ahead even when the test runs in the last minute of an hour.
+  return {id:'daily',name:'Daily routine',activity,days:[0,1,2,3,4,5,6],start:time(minute-60),end:time(minute+60),enabled:true};
 }
 
 test('routine play is applied once across repeated refreshes and restarts', async () => {

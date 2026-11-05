@@ -12,6 +12,10 @@
 </head>
 <body>
 <section id="panel" data-hit hidden aria-label="Pet controls">
+  <button type="button" class="panel-resize panel-resize-corner" data-resize-axis="both" aria-label="Resize menu width and height" title="Drag to resize · arrow keys to stretch · double-click to reset"></button>
+  <button type="button" class="panel-resize panel-resize-top" data-resize-axis="height" aria-label="Resize menu height" title="Drag up or down to stretch height"></button>
+  <button type="button" class="panel-resize panel-resize-left" data-resize-axis="width" aria-label="Resize menu width" title="Drag left or right to stretch width"></button>
+  <div class="panel-content">
   <header class="brand"><span class="brand-mark" aria-hidden="true"></span><strong>Pet Pocket</strong><span class="brand-edition">DESKTOP CLUB</span></header>
   <form id="adopt" hidden>
     <div class="adopt-intro"><span class="eyebrow">NEW GAME</span><h1>Pick your pet</h1><p>Choose a buddy and give them a name.</p></div>
@@ -124,7 +128,7 @@
           <select id="ai-provider"><option value="gemini">Gemini</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>
           <label for="ai-model">Model ID</label><input id="ai-model" maxlength="120" required autocomplete="off">
           <label for="ai-key">API key</label><input type="password" id="ai-key" maxlength="512" autocomplete="new-password" spellcheck="false">
-          <p class="settings-help">Hybrid sends the current chat or generation prompt to your provider. Local tools stay on this PC. Ask Pet falls back to Qwen when the provider fails.</p>
+          <p class="settings-help">Hybrid sends standalone chat or generation prompts to your provider. Follow-ups use local Qwen with recent conversation context, including provider answers. Earlier messages and pet stats stay local. “Use local only” keeps requests local while that instruction remains in recent history. Ask Pet falls back to Qwen when provider output fails validation.</p>
           <div class="settings-row"><button type="submit">Save AI settings</button><button type="button" id="ai-test">Test connection</button><button type="button" id="ai-remove" hidden>Remove key</button></div>
           <p id="ai-result" role="status"></p>
         </fieldset>
@@ -189,6 +193,7 @@
       <p>Crack it for a 40% shot at a Moonclip, or nest it until 6 AM for a Dawn Shard.</p>
       <div class="actions"><button data-action="open">Crack it</button><button data-action="wait">Nest it</button></div>
     </aside>
+  </div>
   </div>
 </section>
 

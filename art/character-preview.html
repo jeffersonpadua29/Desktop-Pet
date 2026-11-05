@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Pocket · Character studio</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+  body { background: #f6f0e8; padding: 36px 44px; max-width: 1080px; margin: auto; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  .eyebrow { color: #8c749a; font-family: 'Segoe UI', sans-serif; font-size: 10px; letter-spacing: .18em; }
+  h1 { font: 600 32px/1.3 'Segoe UI', sans-serif; letter-spacing: -.04em; margin: 5px 0 7px; }
+  header p { color: #867989; font-size: 12px; }
+  .edition { color: #8c7d91; font-size: 11px; padding: 8px 12px; border: 1px solid #ded0df; border-radius: 20px; margin-top: 16px; background: #fcf9f4; }
+  .cast { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { display: flex; align-items: center; gap: 13px; min-height: 144px; padding: 8px 16px; border: 1px solid #e4d7e3; border-radius: 20px; background: #fffcf7; box-shadow: inset 0 1px #fff, 0 3px 10px #4a345505; }
+  .card:nth-child(3n+2) { background: #faf5f8; }
+  .card:nth-child(3n) { background: #f1f4ec; border-color: #dbe2d2; }
+  .stage { position: relative; flex: 0 0 124px; width: 124px; height: 124px; }
+  .stage::before { content: ''; position: absolute; inset: 11px; border-radius: 50%; background: #eee5f080; }
+  .mini { position: relative; width: 128px; height: 128px; --frame-size: 128px; background-size: 768px 2560px; }
+  .card strong { font: 600 17px 'Segoe UI', sans-serif; color: #514255; }
+  .card p { font-size: 10px; line-height: 1.7; color: #9b8a9d; margin-top: 5px; }
+  .moods { display: flex; justify-content: space-between; margin-top: 12px; padding: 8px 16px; border: 1px solid #e4d7e3; border-radius: 20px; background: #fffcf7; }
+  .pose { text-align: center; color: #948297; font-size: 10px; }
+  .pose .mini { width: 96px; height: 96px; --frame-size: 96px; background-size: 576px 1920px; background-position-y: calc(-96px * var(--row)); animation: preview-pose 1.4s steps(6) infinite; }
+  @keyframes preview-pose { to { background-position-x: -576px; } }
+  footer { display: flex; justify-content: space-between; padding-top: 18px; font-size: 10px; color: #9b899b; letter-spacing: .03em; }
+</style>
+</head>
+<body>
+<header><div><span class="eyebrow">PET POCKET / CHARACTER STUDIO</span><h1>A little more character.</h1><p>Warm colors, finer pixels, and familiar little personalities.</p></div><span class="edition">SOFT PIXEL · 64 × 64</span></header>
+<main class="cast" aria-label="Character previews">
+  <article class="card" data-kind="anino"><div class="stage"><i class="mini"></i></div><div><strong>Anino</strong><p>Moonlit mischief<br>Curious gremlin</p></div></article>
+  <article class="card" data-kind="cat"><div class="stage"><i class="mini"></i></div><div><strong>Mochi</strong><p>Golden little paws<br>Curious cat</p></div></article>
+  <article class="card" data-kind="dog"><div class="stage"><i class="mini"></i></div><div><strong>Biscuit</strong><p>Always your buddy<br>Playful pup</p></div></article>
+  <article class="card" data-kind="ghost"><div class="stage"><i class="mini"></i></div><div><strong>Boo</strong><p>A softer kind of spooky<br>Dreamy ghost</p></div></article>
+  <article class="card" data-kind="sprout"><div class="stage"><i class="mini"></i></div><div><strong>Pip</strong><p>A little room to grow<br>Gentle sprout</p></div></article>
+  <article class="card" data-kind="robot"><div class="stage"><i class="mini"></i></div><div><strong>Byte</strong><p>A warm little signal<br>Curious robot</p></div></article>
+  <article class="card" data-kind="bunny"><div class="stage"><i class="mini"></i></div><div><strong>Mallow</strong><p>Soft ears, softer heart<br>Gentle bunny</p></div></article>
+  <article class="card" data-kind="cloud"><div class="stage"><i class="mini"></i></div><div><strong>Nimbus</strong><p>Head in the clouds<br>Dreamy puff</p></div></article>
+  <article class="card" data-kind="chicken"><div class="stage"><i class="mini"></i></div><div><strong>Kislap</strong><p>A pocket of sunshine<br>Playful chicken</p></div></article>
+</main>
+<section class="moods" data-kind="cat" aria-label="Animation previews">
+  <div class="pose" style="--row:0"><i class="mini"></i><span>Just here</span></div>
+  <div class="pose" style="--row:2"><i class="mini"></i><span>Little joy</span></div>
+  <div class="pose" style="--row:3"><i class="mini"></i><span>Dreaming</span></div>
+  <div class="pose" style="--row:5"><i class="mini"></i><span>On repeat</span></div>
+  <div class="pose" style="--row:8"><i class="mini"></i><span>Off we go</span></div>
+  <div class="pose" style="--row:18"><i class="mini"></i><span>Paw break</span></div>
+</section>
+<footer><span>9 friends · 20 animation rows · 6 frames per pose</span><span>Native pixel edges. No blur.</span></footer>
+</body>
+</html>

@@ -1,4 +1,4 @@
-param(
+CCparam(
     [Parameter(Mandatory)][ValidateSet('list', 'focus', 'minimize', 'maximize', 'restore')][string]$Action,
     [int]$OwnerProcess,
     [string]$EncodedTarget

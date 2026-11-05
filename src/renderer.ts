@@ -14,7 +14,7 @@ type AskTurn = { role: 'user' | 'assistant'; content: string };
 type AskFile = { name: string; folder: string; modified: number; canOpen: boolean };
 type AiSettingsView = import('./cloud-ai').AiSettingsView;
 type CloudProvider = import('./cloud-ai').CloudProvider;
-type EditPreview = { id: string; path: string; before: string; after: string; test: boolean };
+type EditPreview = { id: string; path: string; sourcePath?: string; before: string; after: string; test: boolean };
 type AskReply = { message: string; mood?: string; files?: AskFile[]; proposal?: EditPreview; run?: import('./cloud-ai').AiRun };
 
 const api = (window as Window & { anino?: {
@@ -30,6 +30,7 @@ const api = (window as Window & { anino?: {
   onOpenControls: (callback: () => void) => void;
   onCareFeedback: (callback: (reaction: { mood: string; message: string }) => void) => void;
   preferences: (input: Preferences) => Promise<HomeSnapshot>;
+  resizePanel: (input: unknown) => Promise<{ width: number; height: number }>;
   ready: () => void;
   todo: (input: import('./todos').TodoChange) => Promise<HomeSnapshot>;
   routines: (input: Routine[]) => Promise<HomeSnapshot>;
@@ -67,6 +68,84 @@ let routineBusy = false;
 let companionDirty = false;
 let renderedCompanion = '';
 let companionPetKind = '';
+let resizingPanel = false;
+let panelLayoutSignature = '';
+
+function applyPanelSize(size: { width: number; height: number }) {
+  panel.style.setProperty('--panel-width', size.width + 'px');
+  panel.style.setProperty('--panel-height', size.height + 'px');
+}
+
+async function updatePanelSize(phase: string, values: Record<string, unknown> = {}) {
+  const size = await api.resizePanel({ phase, adopting: panel.hasAttribute('data-adopting'),
+    weather: petButton.dataset.weather === 'rain' || petButton.dataset.weather === 'storm', ...values });
+  applyPanelSize(size);
+  if (preferences && phase !== 'move' && phase !== 'start' && phase !== 'layout') {
+    preferences.panelWidth = size.width;
+    preferences.panelHeight = size.height;
+  }
+}
+
+function syncPanelLayout() {
+  if (!preferences || resizingPanel) return;
+  const signature = [preferences.panelWidth, preferences.panelHeight, preferences.size,
+    panel.hasAttribute('data-adopting'), petButton.dataset.weather].join(':');
+  if (signature === panelLayoutSignature) return;
+  panelLayoutSignature = signature;
+  void updatePanelSize('layout').catch(() => { panelLayoutSignature = ''; });
+}
+new MutationObserver(syncPanelLayout).observe(panel, { attributes: true, attributeFilter: ['data-adopting'] });
+new MutationObserver(syncPanelLayout).observe(petButton, { attributes: true, attributeFilter: ['data-weather'] });
+
+for (const handle of document.querySelectorAll<HTMLButtonElement>('[data-resize-axis]')) {
+  let pointer: number | undefined;
+  let tick = 0;
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || resizingPanel) return;
+    event.preventDefault();
+    stopIdleRoam();
+    resizingPanel = true;
+    pointer = event.pointerId;
+    handle.setPointerCapture(pointer);
+    panel.toggleAttribute('data-resizing', true);
+    void updatePanelSize('start', { axis: handle.dataset.resizeAxis, width: panel.offsetWidth, height: panel.offsetHeight })
+      .catch(() => { void finish('cancel'); });
+  });
+  handle.addEventListener('pointermove', () => {
+    if (pointer === undefined || tick) return;
+    tick = requestAnimationFrame(() => { tick = 0; void updatePanelSize('move').catch(() => { void finish('cancel'); }); });
+  });
+  async function finish(phase: string) {
+    if (pointer === undefined) return;
+    const id = pointer;
+    pointer = undefined;
+    cancelAnimationFrame(tick);
+    tick = 0;
+    try { await updatePanelSize(phase); }
+    catch { feedback('The menu size could not be saved.'); }
+    finally {
+      resizingPanel = false;
+      panel.removeAttribute('data-resizing');
+      if (handle.hasPointerCapture(id)) handle.releasePointerCapture(id);
+    }
+  }
+  handle.addEventListener('pointerup', () => { void finish('end'); });
+  handle.addEventListener('pointercancel', () => { void finish('cancel'); });
+  handle.addEventListener('lostpointercapture', () => { void finish('end'); });
+  handle.addEventListener('dblclick', () => { void updatePanelSize('reset').catch(() => feedback('The menu size could not be reset.')); });
+  handle.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { void finish('cancel'); return; }
+    const step = event.shiftKey ? 40 : 16;
+    const horizontal = handle.dataset.resizeAxis !== 'height';
+    const vertical = handle.dataset.resizeAxis !== 'width';
+    const dx = horizontal ? event.key === 'ArrowLeft' ? step : event.key === 'ArrowRight' ? -step : 0 : 0;
+    const dy = vertical ? event.key === 'ArrowUp' ? step : event.key === 'ArrowDown' ? -step : 0 : 0;
+    if (!dx && !dy && event.key !== 'Home') return;
+    event.preventDefault();
+    void updatePanelSize(event.key === 'Home' ? 'reset' : 'set', { width: panel.offsetWidth + dx, height: panel.offsetHeight + dy })
+      .catch(() => feedback('The menu size could not be saved.'));
+  });
+}
 
 function feedback(message: string) {
   clearTimeout(feedbackTimer);
@@ -79,6 +158,8 @@ function feedback(message: string) {
 function renderPreferences(state: HomeSnapshot) {
   const previewsChanged = preferences?.alertPreviews !== state.preferences.alertPreviews;
   preferences = state.preferences;
+  if (!resizingPanel) applyPanelSize({ width: preferences.panelWidth, height: preferences.panelHeight });
+  syncPanelLayout();
   quietHoursActive = state.quietHoursActive;
   document.documentElement.style.setProperty('--pet-scale', String({ small: .75, medium: 1, large: 1.25 }[preferences.size]));
   petButton.toggleAttribute('data-locked', preferences.locked);
@@ -86,6 +167,7 @@ function renderPreferences(state: HomeSnapshot) {
   if (!preferencesDirty && serialized !== renderedPreferences) {
     for (const [name, value] of Object.entries(preferences)) {
       const control = preferencesForm.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement;
+      if (!control) continue;
       if (control instanceof HTMLInputElement && control.type === 'checkbox') control.checked = Boolean(value);
       else control.value = String(value);
     }
@@ -723,13 +805,14 @@ preferencesForm.addEventListener('submit', async event => {
   const values: Record<string, string | boolean> = {};
   for (const name of Object.keys(preferences)) {
     const control = preferencesForm.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement;
+    if (!control) continue;
     values[name] = control instanceof HTMLInputElement && control.type === 'checkbox' ? control.checked : control.value;
   }
   const controls = [...preferencesForm.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('input, select, button')];
   controls.forEach(control => { control.disabled = true; });
   revision++;
   try {
-    const state = await api.preferences(values as Preferences);
+    const state = await api.preferences({ ...preferences, ...values } as Preferences);
     preferencesDirty = false;
     renderHome(state);
     result.textContent = 'Settings saved.';
@@ -1121,14 +1204,14 @@ function showProjectPreview(preview: EditPreview) {
   const heading = document.createElement('strong');
   heading.textContent = 'Review file changes';
   const path = document.createElement('p');
-  path.textContent = preview.path;
+  path.textContent = preview.sourcePath ? preview.sourcePath + ' → ' + preview.path : preview.path;
   const source = (label: string, text: string, expanded: boolean) => {
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     const pre = document.createElement('pre');
     const code = document.createElement('code');
     summary.textContent = label;
-    highlightPreview(code, text, preview.path);
+    highlightPreview(code, text, label === 'Current contents' ? preview.sourcePath ?? preview.path : preview.path);
     pre.append(code);
     details.open = expanded;
     details.append(summary, pre);
@@ -1136,7 +1219,7 @@ function showProjectPreview(preview: EditPreview) {
   };
   const actions = document.createElement('div');
   actions.className = 'settings-row';
-  for (const [apply, label] of [[true, preview.test ? 'Apply & run npm test' : 'Apply to file'], [false, 'Discard']] as const) {
+  for (const [apply, label] of [[true, preview.test ? 'Apply & run npm test' : preview.sourcePath ? 'Save converted file' : 'Apply to file'], [false, 'Discard']] as const) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;

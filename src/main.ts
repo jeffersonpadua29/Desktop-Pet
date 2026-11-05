@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { canOpenAssistantFile, findFiles, interpret, model, namedFileReference, renameRequest, saveGeneratedFile, type FileMatch, type Intent, type NamedFile, type SpotifyAction, type SpotifyContext, type Turn } from './assistant';
 import { isWindowsFilename, renameLocalFile } from './file-rename';
+import { localOnlyRequest } from './ai-context';
+import { analyzeFile, inspectFile, checkFileSnapshot, type FileOperation } from './file-agent';
 import { chatCloud, cloudModels, isCloudModel, isCloudProvider, type AiRun, type AiSettingsView, type CloudConfig } from './cloud-ai';
 import { applyProjectSource, isEditableFile, proposeSource, selectProjectSource, type FileScope, type ProjectEdit, type ProjectSource } from './project-ai';
 import { execFile, spawn } from 'node:child_process';
@@ -12,6 +14,8 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { act, advance, fresh, isSpecies, companionDetails, customizePet, type Pet, type Species } from './pet';
 import { defaultPreferences, normalizePreferences, isQuietTime } from './settings';
+import { fitPanel, panelDefaults } from './panel-layout';
+import { convertedFilename } from './code-language';
 import { detectLocation, searchLocations, normalizeLocation, fetchWeather, type WeatherLocation, type WeatherState } from './weather';
 import { routineAt, restoreRoutines, validateRoutines, type Routine, type RoutineState } from './routines';
 import { restoreTodos, changeTodo, pendingReminders, reminderMessage, type Todo } from './todos';
@@ -221,6 +225,59 @@ let playing = false;
 let roamTimer: ReturnType<typeof setInterval> | undefined;
 let roamOrigin: Electron.Point | undefined;
 let dragOffset: Electron.Point | undefined;
+let panelResize: { point: Electron.Point; bounds: Electron.Rectangle; area: Electron.Rectangle;
+  width: number; height: number; bottomSpace: number; axis: 'both' | 'width' | 'height' } | undefined;
+
+function resizeMenu(input: unknown) {
+  const current = () => ({ width: home.preferences.panelWidth, height: home.preferences.panelHeight });
+  if (!input || typeof input !== 'object' || toyHome) return current();
+  const data = input as Record<string, unknown>;
+  const scale = { small: .75, medium: 1, large: 1.25 }[home.preferences.size];
+  const bottomSpace = data.adopting === true ? 35 : 26 + Math.round((128 + (data.weather === true ? 25 : 0)) * scale);
+  if (data.phase === 'start') {
+    if (!['both', 'width', 'height'].includes(String(data.axis)) || typeof data.width !== 'number' || !Number.isFinite(data.width) ||
+        typeof data.height !== 'number' || !Number.isFinite(data.height)) return current();
+    stopRoam(false);
+    dragOffset = undefined;
+    const bounds = win.getBounds();
+    panelResize = { point: screen.getCursorScreenPoint(), bounds, area: screen.getDisplayMatching(bounds).workArea,
+      width: data.width, height: data.height, bottomSpace, axis: data.axis as 'both' | 'width' | 'height' };
+    ignoreMouse = false;
+    win.setIgnoreMouseEvents(false, { forward: true });
+    return { width: data.width, height: data.height };
+  }
+  if (data.phase === 'cancel') {
+    if (panelResize) { win.setBounds(panelResize.bounds); home.position = { x: panelResize.bounds.x, y: panelResize.bounds.y }; }
+    panelResize = undefined;
+    return current();
+  }
+  let width: unknown, height: unknown;
+  if (data.phase === 'move' || data.phase === 'end') {
+    if (!panelResize) return current();
+    const point = screen.getCursorScreenPoint();
+    width = panelResize.width + (panelResize.axis !== 'height' ? panelResize.point.x - point.x : 0);
+    height = panelResize.height + (panelResize.axis !== 'width' ? panelResize.point.y - point.y : 0);
+  } else if (data.phase === 'reset') ({ width, height } = panelDefaults);
+  else if (data.phase === 'layout') ({ width, height } = current());
+  else if (data.phase === 'set') ({ width, height } = data);
+  else return current();
+  if (typeof width !== 'number' || !Number.isFinite(width) || typeof height !== 'number' || !Number.isFinite(height)) return current();
+  const size = normalizePreferences({ ...home.preferences, panelWidth: width, panelHeight: height });
+  const bounds = panelResize?.bounds ?? win.getBounds();
+  const fitted = fitPanel({ width: size.panelWidth, height: size.panelHeight }, bounds,
+    panelResize?.area ?? screen.getDisplayMatching(bounds).workArea, panelResize?.bottomSpace ?? bottomSpace);
+  // A frameless window remains non-resizable to Windows; our handles resize its
+  // viewport while keeping the pet's bottom-right anchor fixed where possible.
+  win.setBounds(fitted.bounds);
+  if (data.phase !== 'move' && data.phase !== 'layout') {
+    home.preferences.panelWidth = fitted.size.width;
+    home.preferences.panelHeight = fitted.size.height;
+    home.position = { x: fitted.bounds.x, y: fitted.bounds.y };
+    panelResize = undefined;
+    save();
+  }
+  return fitted.size;
+}
 
 function stopRoam(restore = true) {
   if (roamTimer) clearInterval(roamTimer);
@@ -529,12 +586,74 @@ function rememberAssistantFile(pet: Pet, path: string) {
 
 function matchingFileReferences(pet: Pet, reference: NamedFile) {
   const context = fileConversation?.pet === pet ? fileConversation : undefined;
+  if (!reference.folder && context?.selected?.name.toLowerCase() === reference.name.toLowerCase()) return [context.selected];
   const recent = reference.folder ? [] : [context?.selected, ...(context?.files ?? [])].filter(
     (file): file is EditorFile => Boolean(file && file.name.toLowerCase() === reference.name.toLowerCase()),
   );
   const files = recent.length ? recent : namedLocalFiles(reference.name, reference.folder ? foldersForFile(reference.folder) :
     [...foldersForFile('documents'), app.getPath('downloads'), app.getPath('desktop')]);
   return [...new Map(files.map(file => [file.path.toLowerCase(), file])).values()];
+}
+
+function resolveAssistantFile(pet: Pet, operation: Pick<FileOperation, 'name' | 'folder'>) {
+  const context = fileConversation?.pet === pet ? fileConversation : undefined;
+  const selected = context?.selected ?? (context?.files.length === 1 ? context.files[0] : undefined);
+  const name = operation.name ?? (operation.folder ? selected?.name : undefined);
+  const matches = name ? matchingFileReferences(pet, { name, folder: operation.folder }) : selected ? [selected] : [];
+  if (matches.length !== 1) return { error: matches.length > 1
+    ? 'I found multiple files with that name. Specify Documents, Downloads, or Desktop, or select a result first.'
+    : operation.name ? 'I couldn’t find “' + operation.name + '”. Find or select the file first, or specify its folder.'
+      : 'Which file do you mean? Give me an exact filename or select one result first.' };
+  return { file: matches[0] };
+}
+
+async function performFileOperation(pet: Pet, operation: FileOperation, turns: Turn[], onRun?: (run: AiRun) => void) {
+  const resolved = resolveAssistantFile(pet, operation);
+  if (!resolved.file) return { message: resolved.error };
+  const target = resolved.file;
+  try {
+    const snapshot = await inspectFile(target.path);
+    if (pet !== currentPet()) return { message: 'Your active pet changed. Ask again.' };
+    if (operation.action === 'delete') {
+      await checkFileSnapshot(snapshot);
+      await shell.trashItem(snapshot.path);
+      // A successful delete must not leave a stale target for a later "edit it".
+      const remaining = (fileConversation?.pet === pet ? fileConversation.files : []).filter(file => file.path !== target.path);
+      assistantFiles = remaining;
+      fileConversation = remaining.length ? { pet, files: remaining } : undefined;
+      if (projectProposal?.source.path === target.path) projectProposal = undefined;
+      onRun?.({ engine: 'windows' });
+      return { message: 'Moved “' + target.name + '” to the Recycle Bin. You can restore it there.',
+        files: remaining.map(({ path: _path, ...card }) => card) };
+    }
+    if (operation.action === 'open') {
+      const error = isEditableFile(target.name) ? await launchVSCode(snapshot.path) :
+        canOpenAssistantFile(target.name) ? await shell.openPath(snapshot.path) : 'This file type cannot be opened here. Use Show in folder.';
+      if (error) return { message: error };
+      const card = rememberAssistantFile(pet, snapshot.path);
+      onRun?.({ engine: 'windows' });
+      return { message: 'Sent “' + target.name + '” to ' + (isEditableFile(target.name) ? 'VS Code.' : 'its Windows app.'), files: [card] };
+    }
+    const source = await selectProjectSource(dirname(snapshot.path), basename(snapshot.path));
+    await checkFileSnapshot(snapshot);
+    const card = rememberAssistantFile(pet, source.path);
+    if (operation.action === 'read') {
+      onRun?.({ engine: 'windows' });
+      return { message: 'Contents of “' + target.name + '”:\n\n' + (source.original || '(empty file)'), files: [card] };
+    }
+    onRun?.({ engine: 'qwen' });
+    const answer = await analyzeFile(source, operation.request, model, turns);
+    if (pet !== currentPet()) return { message: 'Your active pet changed. Ask again.' };
+    // Avoid presenting analysis of a snapshot that changed during generation.
+    await checkFileSnapshot(snapshot);
+    return { message: answer, files: [card] };
+  } catch (error) {
+    const detail = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : '';
+    return { message: operation.action === 'delete'
+      ? 'Windows couldn’t move “' + target.name + '” to the Recycle Bin. No deletion was confirmed.'
+      : 'I couldn’t ' + operation.action + ' “' + target.name + '”. ' +
+        (detail.includes('file') || detail.includes('source') || detail.includes('Qwen') ? detail : 'Check that the file is still available.') };
+  }
 }
 
 async function handleRename(pet: Pet, text: string) {
@@ -558,7 +677,8 @@ async function handleRename(pet: Pet, text: string) {
   const source = suppliedNewName ? undefined : reference;
   let target = pending?.target ?? context?.selected ?? (context?.files.length === 1 ? context.files[0] : undefined);
   const newName = request?.newName ?? (suppliedNewName ? reference?.name : pending?.newName);
-  if (newName !== undefined && !isWindowsFilename(newName)) return { message: 'Use a valid Windows filename for the new name.' };
+  const extensionOnly = newName !== undefined && /^\.[a-z0-9]{1,16}$/i.test(newName);
+  if (newName !== undefined && !extensionOnly && !isWindowsFilename(newName)) return { message: 'Use a valid Windows filename for the new name.' };
   if (source) {
     const matches = matchingFileReferences(pet, source);
     if (matches.length !== 1) {
@@ -572,7 +692,8 @@ async function handleRename(pet: Pet, text: string) {
     renameConversation = { pet, at: Date.now(), target, newName };
     return { message: target ? 'What should I rename “' + target.name + '” to?' : 'What is the current filename and folder?' };
   }
-  const finalName = extname(newName) ? newName : newName + extname(target.name);
+  const finalName = extensionOnly ? target.name.slice(0, target.name.length - extname(target.name).length) + newName.toLowerCase() :
+    extname(newName) ? newName : newName + extname(target.name);
   if (!isWindowsFilename(finalName)) return { message: 'Use a valid Windows filename for the new name.' };
   if (finalName === target.name) return { message: 'The file is already named “' + target.name + '”.' };
   let path: string;
@@ -612,7 +733,13 @@ async function previewProjectEdit(pet: Pet, edit: ProjectEdit, cloud: CloudConfi
   }
   let source: ProjectSource;
   try { source = await selectProjectSource(folder, filename); }
-  catch { return { message: 'I couldn’t read “' + name + '”. Choose an existing UTF-8 text or source file under 8 KB.' }; }
+  catch { return { message: 'I couldn’t read “' + name + '”. Choose an existing UTF-8 text or source file under 32 KB.' }; }
+  const outputName = convertedFilename(source.path, edit);
+  const outputPath = join(dirname(source.path), outputName);
+  const newFile = outputPath.toLowerCase() !== source.path.toLowerCase();
+  if (!isWindowsFilename(outputName) || !isEditableFile(outputName)) return { message: 'Use a supported output filename without a folder path.' };
+  if (newFile && existsSync(outputPath)) return { message: 'A file named “' + outputName + '” already exists in that folder. Choose another output filename.' };
+  edit = { ...edit, ...(newFile ? { outputName } : {}) };
   if (cloud) {
     const approval = await dialog.showMessageBox(win, {
       type: 'question', title: 'Review cloud sharing', message: 'Send this file to ' + cloud.provider + '?',
@@ -625,11 +752,12 @@ async function previewProjectEdit(pet: Pet, edit: ProjectEdit, cloud: CloudConfi
   try {
     const result = await proposeSource({ ...edit, file: name }, source, model, cloud);
     onRun?.(result.fallback ? { engine: result.engine, fallback: result.fallback } : { engine: result.engine });
-    if (result.content === source.original) return { message: 'The proposed source matches the current file.' };
+    if (!newFile && result.content === source.original) return { message: 'The proposed source matches the current file.' };
     const id = randomUUID();
     projectProposal = { id, pet, source, content: result.content, edit };
-    return { message: 'Review the changes to “' + name + '”, then apply them to update the file.', proposal: {
-      id, path: source.path, before: source.original, after: result.content, test: edit.test,
+    return { message: newFile ? 'Review “' + outputName + '”, then apply to save it alongside “' + name + '”.' :
+      'Review the changes to “' + name + '”, then apply them to update the file.', proposal: {
+      id, path: outputPath, ...(newFile ? { sourcePath: source.path } : {}), before: source.original, after: result.content, test: edit.test,
     } };
   } catch {
     onRun?.({ engine: 'qwen', ...(cloud ? { fallback: cloud.provider } : {}) });
@@ -664,14 +792,16 @@ async function approveProjectEdit(id: unknown, apply: unknown) {
   if (apply !== true) return { message: 'Project edit discarded.' };
   assistantPending = true;
   try {
-    try { await applyProjectSource(proposal.source, proposal.content); }
-    catch { return { message: 'I couldn’t apply the edit. The file may have changed since the preview. Request a new edit.' }; }
-    const edited = { name: basename(proposal.source.path), folder: dirname(proposal.source.path),
-      path: proposal.source.path, modified: Date.now(), canOpen: /\.(?:txt|md|json)$/i.test(proposal.source.path) };
+    try { await applyProjectSource(proposal.source, proposal.content, proposal.edit.outputName); }
+    catch { return { message: 'I couldn’t apply the edit. The source may have changed or the output filename may already exist. Request a new edit.' }; }
+    const outputPath = join(dirname(proposal.source.path), convertedFilename(proposal.source.path, proposal.edit));
+    const newFile = outputPath.toLowerCase() !== proposal.source.path.toLowerCase();
+    const edited = { name: basename(outputPath), folder: dirname(outputPath),
+      path: outputPath, modified: Date.now(), canOpen: /\.(?:txt|md|json)$/i.test(outputPath) };
     assistantFiles = [edited];
     fileConversation = { pet: proposal.pet, files: assistantFiles, selected: edited };
     const { path: _editedPath, ...fileCard } = edited;
-    let message = 'Updated “' + edited.name + '” on disk.';
+    let message = newFile ? 'Saved “' + edited.name + '” on disk. Kept “' + basename(proposal.source.path) + '” as the original.' : 'Updated “' + edited.name + '” on disk.';
     if (!proposal.edit.test) return { message, files: [fileCard] };
     const { status, output } = await runProjectTests(proposal.source.root);
     message += '\nnpm test · ' + status + '\n' + output;
@@ -691,21 +821,10 @@ async function approveProjectEdit(id: unknown, apply: unknown) {
 
 async function openAssistantFileInVSCode(pet: Pet, intent: Extract<Intent, { type: 'open-in-vscode' }>) {
   const context = fileConversation?.pet === pet ? fileConversation : undefined;
-  let file = context?.selected ?? (context?.files.length === 1 ? context.files[0] : undefined);
-  const name = intent.name ?? (intent.folder ? file?.name : undefined);
-  if (name !== undefined) {
-    const key = name.toLowerCase();
-    const matches = intent.folder ? [] : context?.files.filter(item => item.name.toLowerCase() === key) ?? [];
-    if (matches.length > 1) return 'I found multiple files named “' + name + '”. Use Open in VS Code on the result you want.';
-    file = matches[0];
-    if (!file) file = namedLocalFiles(name, foldersForFile(intent.folder))[0];
-    if (!file) {
-      const searched = intent.folder === 'documents' ? 'Documents or Documents → Pet Pocket' :
-        intent.folder ? fileScopeLabels[intent.folder] : 'the latest results or Documents → Pet Pocket';
-      return 'I couldn’t find “' + name + '” in ' + searched + '. Ask me to find it first.';
-    }
-  }
-  if (!file) return 'Which file should I open in VS Code? Give me the filename.';
+  const resolved = resolveAssistantFile(pet, intent);
+  if (!resolved.file) return resolved.error;
+  const file = resolved.file;
+  try { await inspectFile(file.path); } catch { return 'This file is no longer available or is a link.'; }
   const error = await launchVSCode(file.path);
   if (error) return error;
   fileConversation = { pet, files: context?.files ?? [], selected: file };
@@ -719,10 +838,13 @@ async function askPet(input: unknown, scope: unknown, onRun?: (run: AiRun) => vo
   const turns: Turn[] = [];
   for (const entry of input.slice(-7)) {
     if ((entry?.role === 'user' || entry?.role === 'assistant') && typeof entry.content === 'string') {
-      turns.push({ role: entry.role, content: entry.content.slice(0, 1600) });
+      // Retain a complete bounded read result so saving it cannot silently save
+      // only its opening paragraph. Model history has a separate token budget.
+      turns.push({ role: entry.role, content: entry.content.slice(0, entry.role === 'assistant' ? 36_000 : 1600) });
     }
   }
   if (turns.at(-1)?.role !== 'user' || !turns.at(-1)?.content.trim()) return { message: 'Type a question or command first.' };
+  const cloud = turns.some(turn => turn.role === 'user' && localOnlyRequest(turn.content)) ? undefined : configuredCloud();
   if (/^(?:please\s+)?apply\s+(?:it|the (?:edit|changes|change))[.!]?$/i.test(turns.at(-1)!.content.trim())) {
     if (!projectProposal || projectProposal.pet !== pet) return { message: 'There’s no edit preview to apply. Ask me what to change first.' };
     return approveProjectEdit(projectProposal.id, true);
@@ -744,13 +866,14 @@ async function askPet(input: unknown, scope: unknown, onRun?: (run: AiRun) => vo
       lastDraft = text;
       lastDraftAt = Date.now();
       win.webContents.send('assistant-draft', text);
-    }, spotify, { cloud: configuredCloud(), onRun, hasFileContext: fileConversation?.pet === pet });
+    }, spotify, { cloud, onRun, hasFileContext: fileConversation?.pet === pet });
     if (intent.type === 'reply') {
       spotifyConversation = spotify;
       return { message: intent.message };
     }
     if (intent.type === 'window') return await controlDesktop(intent);
-    if (intent.type === 'project-edit') return await previewProjectEdit(pet, intent.edit, configuredCloud(), onRun);
+    if (intent.type === 'file-operation') return await performFileOperation(pet, intent.operation, turns, onRun);
+    if (intent.type === 'project-edit') return await previewProjectEdit(pet, intent.edit, cloud, onRun);
     if (intent.type === 'open-in-vscode') {
       const message = await openAssistantFileInVSCode(pet, intent);
       assistantFiles = fileConversation?.pet === pet ? fileConversation.files : [];
@@ -866,7 +989,7 @@ function returnToScreen() {
   dragOffset = undefined;
   closeToyStage();
   const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
-  const width = Math.min(360, area.width), height = Math.min(580, area.height);
+  const width = Math.min(home.preferences.panelWidth + 26, area.width), height = Math.min(home.preferences.panelHeight + 154, area.height);
   const x = Math.round(area.x + Math.max(0, area.width - width - 12));
   const y = Math.round(area.y + Math.max(0, area.height - height - 12));
   win.setBounds({ x, y, width, height });
@@ -930,7 +1053,7 @@ else app.whenReady().then(() => {
   weather.location = home.weatherLocation;
   updatePets();
   const area = screen.getDisplayNearestPoint(home.position ?? screen.getCursorScreenPoint()).workArea;
-  const width = 360, height = Math.min(580, area.height);
+  const width = Math.min(home.preferences.panelWidth + 26, area.width), height = Math.min(home.preferences.panelHeight + 154, area.height);
   win = new BrowserWindow({
     x: Math.max(area.x, Math.min(home.position?.x ?? area.x + area.width - width - 12, area.x + area.width - width)),
     y: Math.max(area.y, Math.min(home.position?.y ?? area.y + area.height - height - 12, area.y + area.height - height)),
@@ -941,7 +1064,7 @@ else app.whenReady().then(() => {
   win.setIgnoreMouseEvents(true, { forward: true });
   // Polling also restores click-through if the cursor leaves the window abruptly.
   const hitTest = setInterval(() => {
-    if (!win.isVisible() || dragOffset) return;
+    if (!win.isVisible() || dragOffset || panelResize) return;
     const point = screen.getCursorScreenPoint();
     const bounds = win.getBounds();
     if (point.x < bounds.x || point.x >= bounds.x + bounds.width ||
@@ -1047,12 +1170,19 @@ else app.whenReady().then(() => {
   });
   ipcMain.handle('assistant-file', async (_event, index: unknown, action: unknown) => {
     if (typeof index !== 'number' || !Number.isInteger(index)) return 'File selection is unavailable.';
+    const context = fileConversation;
+    if (!context || context.pet !== currentPet() || assistantPending) return 'File selection is unavailable.';
     const file = assistantFiles[index];
     if (!file || !existsSync(file.path)) return 'This file is no longer available.';
-    if (action === 'reveal') { shell.showItemInFolder(file.path); return ''; }
-    if (action === 'open' && file.canOpen) return shell.openPath(file.path);
+    try { await inspectFile(file.path); } catch { return 'This file is no longer available or is a link.'; }
+    if (context !== fileConversation || context.pet !== currentPet()) return 'File selection is unavailable.';
+    if (action === 'reveal') { shell.showItemInFolder(file.path); context.selected = file; return ''; }
+    if (action === 'open' && file.canOpen) {
+      const error = await shell.openPath(file.path);
+      if (!error && context === fileConversation && context.pet === currentPet()) context.selected = file;
+      return error;
+    }
     if (action === 'vscode') {
-      const context = fileConversation;
       const error = await launchVSCode(file.path);
       if (!error && context && context === fileConversation && context.pet === currentPet()) context.selected = file;
       return error;
@@ -1062,6 +1192,7 @@ else app.whenReady().then(() => {
   ipcMain.handle('setup-notifications', launchNotificationSetup);
   ipcMain.handle('status', status);
   ipcMain.handle('preferences', (_event, input: unknown) => changePreferences(input));
+  ipcMain.handle('resize-panel', (_event, input: unknown) => resizeMenu(input));
   ipcMain.on('renderer-ready', () => { rendererIsReady = true; checkTodoReminders(); });
   ipcMain.handle('todo', (_event, input: unknown) => {
     const previous = home.todos;

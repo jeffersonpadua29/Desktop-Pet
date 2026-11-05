@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('anino', {
   onOpenControls: (callback: () => void) => ipcRenderer.on('open-controls', callback),
   onCareFeedback: (callback: (reaction: { mood: string; message: string }) => void) => ipcRenderer.on('care-feedback', (_event, reaction) => callback(reaction)),
   preferences: (input: unknown) => ipcRenderer.invoke('preferences', input),
+  resizePanel: (input: unknown) => ipcRenderer.invoke('resize-panel', input),
   ready: () => ipcRenderer.send('renderer-ready'),
   todo: (input: unknown) => ipcRenderer.invoke('todo', input),
   routines: (input: unknown) => ipcRenderer.invoke('routines', input),

@@ -3,13 +3,35 @@ const assert = require('node:assert/strict');
 const { mkdtemp, readFile, rmdir, unlink } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-const { interpret, saveGeneratedFile } = require('../dist/assistant');
+const { interpret, saveGeneratedFile, renameRequest } = require('../dist/assistant');
 
 const pet = { name: 'Anino', food: 80, energy: 80, bond: 10, asleep: false };
 const ask = (content, previous = []) =>
   interpret([...previous, { role: 'user', content }], pet, 'Downloads');
 const toolReply = (name, content) => Response.json({
   message: { tool_calls: [{ function: { name: 'create_file', arguments: { name, content } } }] },
+});
+
+test('extension and filename corrections resolve to explicit rename destinations', () => {
+  for (const request of ['Change the extension to c', 'Change its extension to .c', 'Rename it to .c', 'Change it to .c']) {
+    assert.equal(renameRequest(request)?.newName, '.c', request);
+    assert.equal(renameRequest(request)?.invalidSource, false, request);
+  }
+  assert.equal(renameRequest('Change the filename to sort.c').newName, 'sort.c');
+  assert.equal(renameRequest('Change script.py to script.c').source.name, 'script.py');
+  assert.equal(renameRequest('Change the filename of script.py to ready.c').newName, 'ready.c');
+  assert.equal(renameRequest('Change the extension of sort.py in Downloads to c').source.folder, 'downloads');
+  assert.equal(renameRequest('Convert it to C'), undefined);
+});
+
+test('saving a previous answer as text retains it exactly without another model call', async t => {
+  const answer = 'Long grounded answer.\n'.repeat(800);
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('Saving existing text does not need inference.'));
+  const result = await ask('Save the previous answer as copy.txt', [{ role: 'assistant', content: answer }]);
+  assert.deepEqual(result, { type: 'create-file', file: { name: 'copy.txt', content: answer } });
+  assert.match((await ask('Save the previous answer as copy.txt')).message, /Which answer/);
+  assert.match((await ask('Save the previous answer as copy.txt', [{ role: 'assistant', content: 'x'.repeat(40_000) }])).message, /too large/);
+  assert.match((await ask('Save that as copy.csv', [{ role: 'assistant', content: answer }])).message, /too large for a complete model conversion/);
 });
 
 test('creation uses the file tool and writes the returned content without overwriting', async t => {

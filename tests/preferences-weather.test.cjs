@@ -26,6 +26,14 @@ test('quiet hours cover midnight, daytime boundaries, and equal times', () => {
   assert.equal(isQuietTime({ ...preferences, quietStart: '07:00' }, at(0)), false);
 });
 
+test('saved menu sizes reject non-numbers and clamp to usable limits', () => {
+  assert.equal(normalizePreferences({ panelWidth: '600', panelHeight: Infinity }).panelWidth, 334);
+  assert.equal(normalizePreferences({ panelHeight: Infinity }).panelHeight, 426);
+  const limits = normalizePreferences({ panelWidth: 10000, panelHeight: -100 });
+  assert.equal(limits.panelWidth, 960);
+  assert.equal(limits.panelHeight, 240);
+});
+
 test('locations validate coordinates, including zero and negative coordinates', () => {
   assert.equal(normalizeLocation({ name: 'City', latitude: 91, longitude: 0, source: 'city' }), null);
   assert.equal(normalizeLocation({ name: 'City', latitude: '0', longitude: 0, source: 'ip' }), null);

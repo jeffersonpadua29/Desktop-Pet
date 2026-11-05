@@ -3,6 +3,8 @@ import { basename, extname, join } from 'node:path';
 import { chatCloud, type AiRun, type CloudConfig, type ModelMessage, type ModelTool } from './cloud-ai';
 import { projectEdit, type FileScope, type ProjectEdit } from './project-ai';
 import { isWindowsFilename } from './file-rename';
+import { conversationHistory, localOnlyRequest, needsConversationContext, needsPrivateContext, sharedAssistantRules } from './ai-context';
+import { fileOperation, type FileOperation } from './file-agent';
 
 export const model: string = require('../package.json').config.ollama_model;
 const localChat = 'http://127.0.0.1:11434/api/chat';
@@ -36,6 +38,7 @@ export type Intent =
   | { type: 'find'; search: Search }
   | { type: 'create-file'; file: GeneratedFile; destination?: 'downloads'; openInVSCode?: true }
   | { type: 'project-edit'; edit: ProjectEdit }
+  | { type: 'file-operation'; operation: FileOperation }
   | { type: 'open-in-vscode'; name?: string; folder?: FileScope }
   | { type: 'launch'; target: LaunchTarget }
   | { type: 'window'; action: 'list' }
@@ -126,7 +129,7 @@ const tools: ModelTool[] = [
 function commandText(text: string) {
   return text.trim()
     .replace(/^(?:hi|hello|hey)[\s,.!]+/i, '')
-    .replace(/^(?:(?:ok(?:ay)?|now|then|actually|instead|please|paki)[,\s]+|(?:can|could|would|will) you\s+|(?:i need|i want) you to\s+|i (?:said|meant)[,\s]+|pa-)+/i, '')
+    .replace(/^(?:(?:ok(?:ay)?|now|then|actually|instead(?!\s+of\b)|please|paki)[,\s]+|(?:can|could|would|will) you\s+|(?:i need|i want) you to\s+|i (?:said|meant)[,\s]+|pa-)+/i, '')
     .replace(/^(?:buksan|i-open)\s+/i, 'open ')
     .replace(/^(?:hanapin|i-search)\s+(?:ang\s+)?/i, 'find ')
     .replace(/^(?:gawan mo ako ng|gumawa ka ng)\s+/i, 'create ');
@@ -162,7 +165,20 @@ export function namedFileReference(text: string): NamedFile | undefined {
 }
 
 export function renameRequest(text: string) {
-  const action = /^rename(?:\s+([\s\S]+))?[.!?]*$/i.exec(commandText(text));
+  let command = commandText(text);
+  const extension = /^(?:change|switch|set|update)\s+(?:(?:the|its|this|that)\s+)?(?:file\s+)?extension(?:\s+of\s+(.+?))?\s+(?:to|into|as)\s+\.?([a-z0-9]{1,16})(?:\s+instead(?:\s+of\s+\.?[a-z0-9]+)?)?[.!?]*$/i.exec(command);
+  if (extension) command = 'rename ' + (extension[1] ?? 'it') + ' to .' + extension[2].toLowerCase();
+  command = command.replace(/^(?:change|switch|set)\s+(it|this file|that file|the file)\s+(?:to|into)\s+(\.[a-z0-9]{1,16})[.!?]*$/i, 'rename $1 to $2');
+  command = command.replace(/^(?:change|update|set)\s+(?:(?:the|its)\s+)?(?:file\s*name|filename|name)\s+(?:to|into|as)\s+/i, 'rename it to ');
+  const filenameChange = /^(?:change|update|set)\s+(?:(?:the\s+)?(?:file\s*name|filename|name)\s+of\s+)?(.+?)\s+(?:to|into|as)\s+(.+)$/i.exec(command);
+  if (filenameChange) {
+    const from = filenameChange[1], to = literalFilename(filenameChange[2]);
+    if ((namedFileReference(from) || /^(?:it|this file|that file|the file)$/i.test(from)) &&
+        ((isWindowsFilename(to) && /^\.[a-z0-9_-]{1,16}$/i.test(extname(to))) || /^\.[a-z0-9]{1,16}$/i.test(to))) {
+      command = 'rename ' + from + ' to ' + filenameChange[2];
+    }
+  }
+  const action = /^rename(?:\s+([\s\S]+))?[.!?]*$/i.exec(command);
   if (!action) return;
   const subject = action[1]?.trim() ?? '';
   const separation = [...subject.matchAll(/"[^"]*"|“[^”]*”|`[^`]*`|'[^']*'|(?:^|\s+)(to|into|as)\s+/gi)].find(match => match[1]);
@@ -328,7 +344,7 @@ function assistantRules(pet: PetContext | undefined, scope: string, tool?: strin
     name: pet.name, fullness: Math.round(pet.food), energy: Math.round(pet.energy),
     bond: Math.round(pet.bond), asleep: pet.asleep,
   });
-  const base = 'You are Ask Pet on Windows. Reply in clear English. Follow the latest user request. Earlier messages only resolve references. Ask one specific question if an essential detail is missing.';
+  const base = sharedAssistantRules;
   if (tool === 'create_file') return base +
     ' Return the complete requested contents with create_file. Follow the requested format and constraints, including requests to omit code comments. If asked to save a previous answer, use that answer as the contents. Pet Pocket handles saving and any other requested action.' +
     (filename ? ' Use this exact filename: ' + JSON.stringify(filename) + '.' : ' Choose a filename without a folder path.');
@@ -336,7 +352,7 @@ function assistantRules(pet: PetContext | undefined, scope: string, tool?: strin
     ' Use find_files to extract the filename or keyword, extension, and modification date. Pet Pocket searches ' + scope + ' and reports the results.';
   if (tool) return base + ' Use only the supplied tool for the requested action. Pet Pocket executes it and reports the result.';
   return base +
-    ' Answer the question directly and omit internal reasoning. You cannot inspect the screen, browse the web, or read files. Pet Pocket handles supported Windows actions. Do not claim you performed an action.' +
+    ' Answer the question directly and omit internal reasoning. You cannot inspect the screen or browse the web. This chat step has no direct file access. Ask Pet can create files, find files, read or review supported UTF-8 text/source files up to 32 KB, open files, propose edits for review, rename files, and move one exact file to the Recycle Bin. For a file request that has not been resolved, ask for its exact filename or a selected search result. Do not invent file contents. Pet Pocket handles supported Windows actions. Do not claim you performed an action.' +
     (profile ? ' Pet profile: ' + profile + '. Fullness below 30 means hungry and energy below 25 means tired.' : '');
 }
 
@@ -346,7 +362,7 @@ function cleanReply(content: unknown) {
     .replace(/<(think|analysis|reasoning|tool_call)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
     .trim();
   if (/^(?:okay[,.!]?\s+)?(?:the user\b|let me (?:check|think)\b|i need to (?:decide|figure out)\b)/i.test(reply)) return '';
-  return reply.slice(0, 1600);
+  return reply.slice(0, 6000);
 }
 
 function quickIntent(text: string, petName: string): Intent | undefined {
@@ -369,7 +385,8 @@ type OllamaMessage = ModelMessage;
 
 async function readModelReply(response: Response, onDraft?: (text: string) => void): Promise<OllamaMessage> {
   if (!onDraft || !response.body) {
-    const data = await response.json() as { message?: OllamaMessage };
+    const data = await response.json() as { message?: OllamaMessage; error?: string; done_reason?: string };
+    if (data.error || data.done_reason === 'length' || !data.message) throw new Error('Incomplete local response.');
     return data.message ?? {};
   }
   const reader = response.body.getReader();
@@ -377,10 +394,12 @@ async function readModelReply(response: Response, onDraft?: (text: string) => vo
   let pending = '';
   let content = '';
   const toolCalls: NonNullable<OllamaMessage['tool_calls']> = [];
+  let complete = false;
   const readLine = (line: string) => {
     if (!line.trim()) return;
-    const chunk = JSON.parse(line) as { message?: OllamaMessage; error?: string };
-    if (chunk.error) throw new Error('Ollama streaming error');
+    const chunk = JSON.parse(line) as { message?: OllamaMessage; error?: string; done?: boolean; done_reason?: string };
+    if (chunk.error || chunk.done_reason === 'length') throw new Error('Incomplete local response.');
+    if (chunk.done) complete = true;
     content += chunk.message?.content ?? '';
     if (chunk.message?.tool_calls) toolCalls.push(...chunk.message.tool_calls);
     if (toolCalls.length) onDraft('');
@@ -396,6 +415,7 @@ async function readModelReply(response: Response, onDraft?: (text: string) => vo
       for (const line of lines) readLine(line);
     }
     readLine(pending + decoder.decode());
+    if (!complete) throw new Error('Incomplete local stream.');
     return { content, tool_calls: toolCalls };
   } finally { reader.releaseLock(); }
 }
@@ -417,6 +437,8 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
   if (desktop) return desktop;
   const edit = projectEdit(command, ai?.hasFileContext);
   if (edit) return { type: 'project-edit', edit };
+  const operation = fileOperation(command, ai?.hasFileContext);
+  if (operation) return 'error' in operation ? { type: 'reply', message: operation.error } : { type: 'file-operation', operation };
   const music = spotifyIntent(command, spotify);
   if (music) return music;
   const quick = quickIntent(command || latest, pet.name);
@@ -456,15 +478,27 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
       }
     }
   }
+  const previousAnswer = turns.slice(0, -1).reverse().find(turn => turn.role === 'assistant')?.content;
+  const saveAnswer = /^(?:save|export)\s+(?:it|this|that|(?:the\s+)?(?:(?:previous|last)\s+)?(?:answer|reply|response|text|draft))\s+as\s+["“'`]?([^"”'`]+\.(?:txt|md))["”'`]?[.!?]*$/i.exec(fileBody.replace(downloadsLocation, ''));
+  if (tool === 'create_file' && saveAnswer) {
+    if (!previousAnswer) return { type: 'reply', message: 'Which answer should I save? Send the text or ask me to read the file first.' };
+    const file = validateGeneratedFile(saveAnswer[1].trim(), previousAnswer, false);
+    return file ? { type: 'create-file', file, ...creation } : { type: 'reply', message: 'That answer is too large to save as one file (32 KB maximum), or the filename is invalid.' };
+  }
+  if (tool === 'create_file' && previousAnswer && previousAnswer.length > 10_000 && needsConversationContext(command)) {
+    return { type: 'reply', message: 'That previous answer is too large for a complete model conversion. Save it directly as a .txt or .md file, or give me a smaller section to convert.' };
+  }
   const activeTools = tool ? tools.filter(entry => entry.function.name === tool) : [];
   const system = assistantRules(pet, fileSearch?.folder ?? scope, tool, filename);
   const allowEmpty = /\b(?:empty|blank)\b/i.test(command);
-  const needsLocalContext = /\b(?:offline only|locally only|without (?:the )?(?:cloud|internet)|your (?:name|energy|stats|bond)|(?:save|export|explain|revise|rewrite) (?:that|this|it)|(?:previous|last) (?:answer|reply|message))\b/i.test(command);
+  const needsLocalContext = turns.some(turn => turn.role === 'user' && localOnlyRequest(turn.content)) ||
+    needsPrivateContext(command) || needsConversationContext(command);
   const desktopCommand = /^(?:open|launch|start|buksan|close|exit|quit|shut|focus|minimize|maximize|restore)\b/i.test(command);
   let fallback: CloudConfig['provider'] | undefined;
   if (ai?.cloud && (!tool || tool === 'create_file') && !needsLocalContext && !desktopCommand) {
     try {
       const result = await chatCloud(ai.cloud, assistantRules(undefined, scope, tool, filename), prompt, activeTools, tool ? 4096 : 1200);
+      if ((result.tool_calls?.length ?? 0) > 1) throw new Error('Ambiguous provider actions.');
       const call = result.tool_calls?.[0]?.function;
       if (tool === 'create_file') {
         const file = call?.name === tool && validateGeneratedFile(filename ?? call.arguments?.name, call.arguments?.content, allowEmpty);
@@ -482,9 +516,7 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
   }
   ai?.onRun?.({ engine: 'qwen', ...(fallback ? { fallback } : {}) });
   const draft = tool ? undefined : onDraft;
-  const history = turns.slice(-7, -1).map(turn => ({
-    role: turn.role, content: turn.content.slice(0, tool === 'create_file' ? 1600 : 600),
-  }));
+  const history = conversationHistory(turns);
   const signal = AbortSignal.timeout(tool === 'create_file' ? 180_000 : 90_000);
   let message: OllamaMessage;
   try {
@@ -496,7 +528,7 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
       body: JSON.stringify({
         model, stream: Boolean(draft), think: false, keep_alive: '15m',
         ...(tool ? { tools: activeTools } : {}),
-        options: { num_ctx: tool === 'create_file' ? 6144 : 3072, num_predict: tool === 'create_file' ? 2048 : tool ? 120 : 240, temperature: tool ? 0 : .25 },
+        options: { num_ctx: 8192, num_predict: tool === 'create_file' ? 4096 : tool ? 256 : 1200, temperature: tool ? 0 : .25 },
         messages: [{
           role: 'system',
           content: system,
@@ -511,13 +543,15 @@ export async function interpret(turns: Turn[], pet: PetContext, scope: string, o
     };
     message = await readModelReply(response, draft);
   } catch (error) {
+    draft?.('');
     if (signal.aborted || (error instanceof Error && error.name === 'TimeoutError')) {
       return { type: 'reply', message: tool === 'create_file'
         ? 'The local model timed out while writing the contents. No file was saved.'
         : 'The local model took too long. Try a shorter request.' };
     }
-    return { type: 'reply', message: 'I could not reach Ollama on this PC. Run npm run setup:ai and try again.' };
+    return { type: 'reply', message: 'Ollama could not return a complete answer. No action was run. Check that Ollama is running and try again.' };
   }
+  if ((message.tool_calls?.length ?? 0) > 1) return { type: 'reply', message: 'The model proposed multiple actions. No action was run. Please request one action at a time.' };
   const call = message.tool_calls?.[0]?.function;
   if (call && call.name !== tool) return { type: 'reply', message: 'No action was run. Please ask directly if you want me to use a tool.' };
   const args = call?.arguments;

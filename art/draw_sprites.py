@@ -1,31 +1,143 @@
-"""Draw the transparent 32px sprite sheets. Run from the project folder."""
+"""Draw native 64px soft-pixel sprites on a stable 32-unit animation rig."""
 import struct
 import json
 import sys
 import zlib
+import math
 from pathlib import Path
 
 KINDS = {
-    'anino': ('#23182f', '#5d4479', '#9872b4', '#d9ff9b'),
-    'cat': ('#492938', '#eea24f', '#ffe1a2', '#593445'),
-    'dog': ('#462e38', '#c27c55', '#f6d19b', '#442d3d'),
-    'ghost': ('#3e305e', '#aa8bde', '#eae0ff', '#513c76'),
-    'sprout': ('#42324c', '#e69d77', '#ffd6aa', '#4e3949'),
-    'robot': ('#25384f', '#6c9fb5', '#c7edf0', '#a9ffdf'),
-    'bunny': ('#70485d', '#dda6a6', '#fff0dc', '#563747'),
-    'cloud': ('#565381', '#afa9df', '#f9efff', '#53446f'),
-    'chicken': ('#563341', '#f8dfad', '#fff5dc', '#4a3040'),
+    'anino': ('#30263f', '#71608b', '#b5a0d1', '#d9ffad'),
+    'cat': ('#59404b', '#eeb376', '#ffe8bc', '#593445'),
+    'dog': ('#57404a', '#c9916c', '#f9ddae', '#442d3d'),
+    'ghost': ('#514369', '#b4a1df', '#f0e8ff', '#59487b'),
+    'sprout': ('#594552', '#e5ad8b', '#ffe0bc', '#4e3949'),
+    'robot': ('#394b61', '#87afbf', '#d8f0ef', '#b9ffe1'),
+    'bunny': ('#805e70', '#e8b9bc', '#fff3e6', '#563747'),
+    'cloud': ('#70658d', '#c6bde6', '#fff6ff', '#61537c'),
+    'chicken': ('#68505b', '#f5deb0', '#fff6df', '#4a3040'),
 }
 MOODS = ('idle', 'eat', 'happy', 'sleep', 'surprised', 'dance', 'stretch', 'headphones', 'run', 'carry', 'crouch', 'pickup', 'pounce', 'hungry', 'tired', 'groove')
 SIZE = 32
+RASTER_SCALE = 2
+RASTER_SIZE = SIZE * RASTER_SCALE
 FRAMES = 6
+
+
+def paint(pixels, x, y, width, height, color, radius=0):
+    """Rasterize geometry directly on the finer grid, without resampling."""
+    rgba = bytes.fromhex(color.lstrip('#'))
+    if len(rgba) == 3:
+        rgba += b'\xff'
+    left, top = round(x * RASTER_SCALE), round(y * RASTER_SCALE)
+    right, bottom = round((x + width) * RASTER_SCALE), round((y + height) * RASTER_SCALE)
+    r = min(round(radius * RASTER_SCALE), (right - left) // 2, (bottom - top) // 2)
+    for py in range(max(0, top), min(RASTER_SIZE, bottom)):
+        inset = 0
+        if r > 0:
+            dy = max(top + r - py - .5, py + .5 - (bottom - r), 0)
+            inset = round(r - math.sqrt(max(0, r * r - dy * dy)))
+        for px in range(max(0, left + inset), min(RASTER_SIZE, right - inset)):
+            at = (py * RASTER_SIZE + px) * 4
+            pixels[at:at + 4] = rgba
+
+
+def ellipse(pixels, cx, cy, rx, ry, color):
+    # Half-unit samples let ears, cheeks and puffs use smaller pixel steps.
+    for py in range(round((cy - ry) * RASTER_SCALE), round((cy + ry + 1) * RASTER_SCALE)):
+        for px in range(round((cx - rx) * RASTER_SCALE), round((cx + rx + 1) * RASTER_SCALE)):
+            dx, dy = (px + .5) / RASTER_SCALE - cx - .5, (py + .5) / RASTER_SCALE - cy - .5
+            if dx * dx / ((rx + .5) ** 2) + dy * dy / ((ry + .5) ** 2) <= 1:
+                paint(pixels, px / RASTER_SCALE, py / RASTER_SCALE, .5, .5, color)
+
+
+def finish(pixels, kind, mood, anchors):
+    """Small clean highlight clusters, with no noise, blur or dithering."""
+    ink, body, light, eye = (bytes.fromhex(color[1:]) for color in KINDS[kind])
+    # Tiny material details share the rig's anchors, so they travel with the
+    # head and torso instead of flickering in place during an animation.
+    hx, hy, cx, cy, _, _ = anchors
+    base = bytes(pixels)
+
+    def detail(x, y, width, height, color, materials=(body, light)):
+        rgba = bytes.fromhex(color[1:]) + b'\xff'
+        for py in range(max(0, round(y * 2)), min(RASTER_SIZE, round((y + height) * 2))):
+            for px in range(max(0, round(x * 2)), min(RASTER_SIZE, round((x + width) * 2))):
+                offset = (py * RASTER_SIZE + px) * 4
+                if base[offset + 3] == 255 and base[offset:offset + 3] in materials:
+                    pixels[offset:offset + 4] = rgba
+
+    if kind in ('cat', 'dog', 'bunny', 'chicken'):
+        detail(hx - 5, hy + 2, 2, .5, '#fff0d4')
+        detail(hx - 5.5, hy + 2.5, 1, .5, '#fff0d4')
+        detail(cx - 2.5, cy + 1, 1, .5, '#fff4df')
+        detail(cx + 1, cy + 1.5, 1, .5, '#fff4df')
+        if mood not in ('run', 'carry', 'crouch', 'pickup', 'pounce'):
+            detail(hx - 7, hy + 8, 2.5, .5, '#edaaa2')
+            detail(hx + 6, hy + 8, 2.5, .5, '#edaaa2')
+    elif kind == 'anino':
+        detail(hx - 5, hy + 2, 2, .5, '#c0a8da')
+        detail(hx - 6, hy + 2.5, 1, 1, '#a78bc6')
+        detail(cx - 3, cy + 1, 1, 1, '#cdb4e3')
+        detail(cx - 1.5, cy + 1.5, 1, .5, '#cdb4e3')
+    elif kind == 'robot':
+        detail(hx - 7, hy + 2, .5, 3, '#e5fffa')
+        detail(cx - 4, cy + 1, 1.5, .5, '#d5f4f0')
+        detail(cx + 4, cy + 1, 1, 1, '#587d94')
+    elif kind == 'sprout':
+        detail(hx - 5, hy + 2, 2.5, .5, '#fff3d8')
+        detail(cx + 3, cy + 2, .5, 2, '#c6816b')
+        detail(cx + 4, cy + 2.5, .5, 1, '#c6816b')
+    else:
+        detail(hx - 5, hy + 3, 2.5, .5, '#fff9ff')
+        detail(hx - 6, hy + 3.5, 1, .5, '#fff9ff')
+        detail(cx + 5, cy + 1, 1.5, .5, '#cdbbe8')
+    original = bytes(pixels)
+    for py in range(RASTER_SIZE):
+        for px in range(RASTER_SIZE):
+            at = (py * RASTER_SIZE + px) * 4
+            rgb = original[at:at + 3]
+            if original[at + 3] != 255 or rgb not in (body, light):
+                continue
+            # Three broad material tones keep the surface quiet at desktop size.
+            lift = 7 if py < 27 else 2 if py < 40 else -7
+            above = original[at - RASTER_SIZE * 4:at - RASTER_SIZE * 4 + 3] if py else b''
+            left = original[at - 4:at - 1] if px else b''
+            if py < 42 and (above == ink or left == ink):
+                lift += 10
+            pixels[at:at + 3] = bytes(max(0, min(255, channel + lift)) for channel in rgb)
+    # One finer pixel of reflected light per open eye. Closed eyes stay clean.
+    visited = set()
+    for py in range(RASTER_SIZE):
+        for px in range(RASTER_SIZE):
+            if (px, py) in visited:
+                continue
+            at = (py * RASTER_SIZE + px) * 4
+            if original[at:at + 3] != eye or original[at + 3] != 255:
+                continue
+            component, queue = [], [(px, py)]
+            visited.add((px, py))
+            while queue:
+                qx, qy = queue.pop()
+                component.append((qx, qy))
+                for nx, ny in ((qx - 1, qy), (qx + 1, qy), (qx, qy - 1), (qx, qy + 1)):
+                    if not (0 <= nx < RASTER_SIZE and 0 <= ny < RASTER_SIZE) or (nx, ny) in visited:
+                        continue
+                    offset = (ny * RASTER_SIZE + nx) * 4
+                    if original[offset:offset + 3] == eye and original[offset + 3] == 255:
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+            if max(y for _, y in component) - min(y for _, y in component) >= 3 and len(component) <= 80:
+                gx, gy = min(component, key=lambda point: (point[1], point[0]))
+                paint(pixels, gx / 2, gy / 2, .5, .5, '#fff6e8')
+    return pixels
 
 def draw(kind, mood, f, blink_now=False, anchors=None):
     if kind in ('ghost', 'sprout', 'robot', 'bunny', 'cloud'):
         return mascot(kind, mood, f, blink_now, anchors)
     if mood in ('run', 'carry', 'crouch', 'pickup', 'pounce'):
         return profile(kind, mood, f, anchors)
-    pixels = bytearray(SIZE * SIZE * 4)
+    pixels = bytearray(RASTER_SIZE * RASTER_SIZE * 4)
     dark, fur, light, eyes = KINDS[kind]
     pink, gold, purple = '#ff9cad', '#ffd771', '#bfa0ff'
     hop = [0, 1, 2, 1, 0, 0][f]
@@ -39,26 +151,18 @@ def draw(kind, mood, f, blink_now=False, anchors=None):
     x = 0
 
     def box(left, top, width, height, color, moving=True):
-        color = bytes.fromhex(color.lstrip('#'))
-        if len(color) == 3:
-            color += b'\xff'
         if moving:
             left, top = left + x, top + y
-        for py in range(max(0, top), min(SIZE, top + height)):
-            for px in range(max(0, left), min(SIZE, left + width)):
-                i = (py * SIZE + px) * 4
-                pixels[i:i + 4] = color
+        paint(pixels, left, top, width, height, color)
 
     def blob(left, top, width, height, color):
-        box(left + 2, top, width - 4, height, color)
-        box(left, top + 2, width, height - 4, color)
-        box(left + 1, top + 1, width - 2, height - 2, color)
+        paint(pixels, left + x, top + y, width, height, color, radius=2.5)
 
     def star(left, top, color):
         box(left + 1, top, 1, 3, color)
         box(left, top + 1, 3, 1, color)
 
-    box(5, 27, 23, 2, '#1a112a65', False)
+    ellipse(pixels, 16, 27.5, 11, .75, '#1a112a45')
     wag = 0 if music or sleeping or tired else [0, -1, -2, -1, 0, 1][f]
     if kind in ('cat', 'anino', 'dog'):
         box(23, 20, 5, 4, dark)
@@ -259,7 +363,7 @@ def draw(kind, mood, f, blink_now=False, anchors=None):
 
 def profile(kind, mood, frame, anchors=None):
     """Draw a side profile facing left, with a six-frame foot cycle."""
-    pixels = bytearray(SIZE * SIZE * 4)
+    pixels = bytearray(RASTER_SIZE * RASTER_SIZE * 4)
     dark, fur, light, eye = KINDS[kind]
     low = mood in ('crouch', 'pickup')
     running = mood in ('run', 'carry')
@@ -267,19 +371,12 @@ def profile(kind, mood, frame, anchors=None):
     bob = (0, -1, -1, 0, -1, -1)[frame] if running else 1
 
     def rect(x, y, w, h, color):
-        ink = bytes.fromhex(color.lstrip('#'))
-        if len(ink) == 3:
-            ink += b'\xff'
-        for py in range(y, y + h):
-            for px in range(x, x + w):
-                start = (py * SIZE + px) * 4
-                pixels[start:start + 4] = ink
+        paint(pixels, x, y, w, h, color)
 
     def body(x, y, w, h, color):
-        rect(x + 1, y, w - 2, h, color)
-        rect(x, y + 1, w, h - 2, color)
+        paint(pixels, x, y, w, h, color, radius=2)
 
-    rect(5, 27, 23, 2, '#1a112a65')
+    ellipse(pixels, 16, 27.5, 11, .75, '#1a112a45')
     step = (0, -4, -2, 0, 4, 2)[frame] if running else -4 if lunge else 0
     dip = (0, 1, 3, 3, 2, 0)[frame] if mood == 'pickup' else 0
     if kind == 'chicken':
@@ -331,7 +428,7 @@ def profile(kind, mood, frame, anchors=None):
 
 def mascot(kind, mood, frame, blink_now=False, anchors=None):
     """Draw three desktop mascots with a shared pose sheet and distinct motion."""
-    pixels = bytearray(SIZE * SIZE * 4)
+    pixels = bytearray(RASTER_SIZE * RASTER_SIZE * 4)
     ink, shade, glow, eye = KINDS[kind]
     arc = (0, 1, 2, 2, 1, 0)[frame]
     stride = (0, 2, 3, 0, -2, -3)[frame]
@@ -341,33 +438,22 @@ def mascot(kind, mood, frame, blink_now=False, anchors=None):
     music = mood in ('headphones', 'dance', 'groove')
 
     def rect(x, y, w, h, color):
-        rgba = bytes.fromhex(color.lstrip('#'))
-        if len(rgba) == 3:
-            rgba += b'\xff'
-        for py in range(max(0, y), min(SIZE, y + h)):
-            for px in range(max(0, x), min(SIZE, x + w)):
-                start = (py * SIZE + px) * 4
-                pixels[start:start + 4] = rgba
+        paint(pixels, x, y, w, h, color)
 
     def rounded(x, y, w, h, color):
-        rect(x + 2, y, w - 4, h, color)
-        rect(x + 1, y + 1, w - 2, h - 2, color)
-        rect(x, y + 2, w, h - 4, color)
+        paint(pixels, x, y, w, h, color, radius=2.5)
 
     def sparkle(x, y, color):
         rect(x + 1, y, 1, 3, color)
         rect(x, y + 1, 3, 1, color)
 
-    rect(7, 27, 19, 2, '#25193964')
+    ellipse(pixels, 16, 27.5, 9, .75, '#25193945')
     y = arc if sleepy or mood == 'pickup' else -arc if mood in ('happy', 'pounce', 'surprised') else 0
     face_x = -3 if profile else 0
     face_y = y
 
     def oval(cx, cy, rx, ry, color):
-        for py in range(cy - ry, cy + ry + 1):
-            for px in range(cx - rx, cx + rx + 1):
-                if (px - cx) ** 2 * ry ** 2 + (py - cy) ** 2 * rx ** 2 <= rx ** 2 * ry ** 2:
-                    rect(px, py, 1, 1, color)
+        ellipse(pixels, cx, cy, rx, ry, color)
 
     if kind == 'bunny':
         ear = (0, 1, 2, 1, 0, -1)[frame]
@@ -543,7 +629,36 @@ def write_png(path, width, height, rows):
                      + chunk(b'IDAT', zlib.compress(b''.join(b'\0' + row for row in rows)))
                      + chunk(b'IEND', b''))
 
+def write_preview(path):
+    """Render the native character geometry at its 128px desktop size."""
+    cell, width = 144, 432
+    pixels = bytearray(bytes.fromhex('f6f0e8ff') * width * width)
+    cards = ('fffaf4ff', 'f6edf5ff', 'edf2e7ff')
+    for number, kind in enumerate(KINDS):
+        left, top = (number % 3) * cell, (number // 3) * cell
+        for y in range(top + 4, top + cell - 4):
+            for x in range(left + 4, left + cell - 4):
+                if x in (left + 4, left + cell - 5) and (y < top + 10 or y >= top + cell - 10):
+                    continue
+                at = (y * width + x) * 4
+                pixels[at:at + 4] = bytes.fromhex(cards[number % 3])
+        anchors = []
+        frame = finish(draw(kind, 'idle', 0, anchors=anchors), kind, 'idle', anchors)
+        for y in range(128):
+            for x in range(128):
+                source = ((y // 2) * RASTER_SIZE + x // 2) * 4
+                alpha = frame[source + 3] / 255
+                if not alpha:
+                    continue
+                at = ((top + 8 + y) * width + left + 8 + x) * 4
+                pixels[at:at + 3] = bytes(round(frame[source + channel] * alpha + pixels[at + channel] * (1 - alpha)) for channel in range(3))
+    write_png(path, width, width, [pixels[y * width * 4:(y + 1) * width * 4] for y in range(width)])
+
+
 if __name__ == '__main__':
+    if '--preview' in sys.argv:
+        write_preview(Path(sys.argv[sys.argv.index('--preview') + 1]))
+        sys.exit(0)
     attachment_rows = {}
     for kind in KINDS:
         rows = []
@@ -554,13 +669,14 @@ if __name__ == '__main__':
             anchors = []
             for frame in range(FRAMES):
                 points = []
-                frames.append(draw(kind, mood, frame, blink_now=row in (len(MOODS), len(MOODS) + 1), anchors=points))
+                pixels = draw(kind, mood, frame, blink_now=row in (len(MOODS), len(MOODS) + 1), anchors=points)
+                frames.append(finish(pixels, kind, mood, points))
                 anchors.append(points)
             attachment_rows[kind].append(anchors)
-            for y in range(SIZE):
-                rows.append(b''.join(frame[y * SIZE * 4:(y + 1) * SIZE * 4] for frame in frames))
+            for y in range(RASTER_SIZE):
+                rows.append(b''.join(frame[y * RASTER_SIZE * 4:(y + 1) * RASTER_SIZE * 4] for frame in frames))
         if '--attachments-only' not in sys.argv:
-            write_png(Path('art') / (kind + '.png'), SIZE * FRAMES, SIZE * len(rows_moods), rows)
+            write_png(Path('art') / (kind + '.png'), RASTER_SIZE * FRAMES, RASTER_SIZE * len(rows_moods), rows)
     lines = ['// Generated by art/draw_sprites.py. Head, chest, and clip anchors in 32px sprite coordinates.', 'const petAttachmentFrames = {']
     for kind, poses in attachment_rows.items():
         lines.append('  ' + json.dumps(kind) + ': [')
